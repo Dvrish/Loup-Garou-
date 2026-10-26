@@ -19,6 +19,7 @@ export interface Player {
   name: string;
   online: boolean;
   isHost?: boolean;
+  isBot?: boolean;
   isMe?: boolean;
   alive: boolean;
   role?: RoleId;

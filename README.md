@@ -8,15 +8,31 @@ Technologies : React, TypeScript, Vite, Supabase (à venir) et Netlify.
 | Étape | Contenu | État |
 | --- | --- | --- |
 | 1 | Écrans et design (données fictives, aucun serveur) | ✅ |
-| 2 | Partie locale simulée contre des robots | à venir |
+| 2 | Partie locale simulée contre des robots | ✅ |
 | 3 | Moteur de jeu (machine à états) + tests | à venir |
 | 4 | Base de données Supabase, rôles secrets protégés | à venir |
 | 5 | Salles en temps réel, reconnexion, chronos serveur | à venir |
 | 6 | Tests avec plusieurs joueurs réels | à venir |
 | 7 | Mise en ligne définitive sur Netlify | à venir |
 
-À l'étape 1, tout est **factice** : les joueurs, les rôles et les votes sont simulés pour
-montrer les écrans. Le bandeau « Démo » de la table de jeu permet de passer d'une phase à l'autre.
+Depuis l'étape 2, le bouton **Jouer** lance une vraie partie d'entraînement contre des robots :
+les rôles sont tirés au sort, chaque robot agit la nuit, parle dans le chat et vote le jour.
+« Créer une partie » et « Rejoindre » montrent déjà le salon en ligne, mais tant que le
+multijoueur n'existe pas (étape 5), les autres places y sont aussi tenues par des robots.
+
+## Règles appliquées
+
+- **Nuit** : Cupidon (première nuit seulement) unit deux amoureux, la Voyante découvre un rôle,
+  les Loups-garous choisissent une victime, puis la Sorcière peut la sauver (potion de vie) et/ou
+  empoisonner quelqu'un (potion de mort). Chaque potion ne sert qu'une fois.
+- **Aube** : les morts sont annoncés et leur rôle est révélé.
+- **Chasseur** : quand il meurt, il tire sur un joueur de son choix.
+- **Amoureux** : si l'un meurt, l'autre meurt de chagrin. Un couple loup + villageois gagne
+  s'il reste seul en vie.
+- **Jour** : débat, puis vote. En cas d'égalité, l'hôte choisit la règle : personne n'est
+  éliminé, tirage au sort, ou second vote entre les ex æquo.
+- **Victoire** : le village gagne quand tous les loups sont morts ; les loups gagnent dès qu'ils
+  sont au moins aussi nombreux que les autres joueurs vivants.
 
 ## Voir le jeu en ligne avec Netlify (sans rien installer)
 
@@ -49,7 +65,13 @@ droits sur la base de données.
 npm install
 npm run dev     # serveur local
 npm run build   # vérification TypeScript + build de production dans dist/
+npm test        # tests des règles (dont 600 parties jouées entièrement par des robots)
 ```
 
-Organisation : `src/screens` (un fichier par écran), `src/components` (logo, portraits SVG des
-rôles, chat…), `src/lib` (types, données fictives, effets sonores Web Audio).
+Organisation :
+
+- `src/game` : moteur de règles en TypeScript pur (`engine.ts`), décisions des robots
+  (`bots.ts`), phrases du chat (`lines.ts`), et `useLocalGame.ts` qui fait avancer le temps ;
+- `src/screens` : un fichier par écran ;
+- `src/components` : logo, portraits SVG des rôles, chat… ;
+- `src/lib` : types, effets sonores Web Audio, statistiques locales, données du salon de démonstration.

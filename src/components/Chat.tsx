@@ -3,26 +3,28 @@ import { play } from '../lib/audio';
 import type { ChatMessage } from '../lib/types';
 
 interface Props {
-  phase: 'nuit' | 'jour' | 'vote';
-  isWolf: boolean;
+  night: boolean;
+  /** Affiche l'onglet de la meute (loup vivant, ou spectateur). */
+  showWolfTab: boolean;
+  canWritePublic: boolean;
+  canWriteWolves: boolean;
   pseudo: string;
   publicMessages: ChatMessage[];
   wolfMessages: ChatMessage[];
   onSend: (channel: 'public' | 'loups', text: string) => void;
 }
 
-export function Chat({ phase, isWolf, pseudo, publicMessages, wolfMessages, onSend }: Props) {
-  const night = phase === 'nuit';
-  const [tab, setTab] = useState<'public' | 'loups'>(night && isWolf ? 'loups' : 'public');
+export function Chat({ night, showWolfTab, canWritePublic, canWriteWolves, pseudo, publicMessages, wolfMessages, onSend }: Props) {
+  const [tab, setTab] = useState<'public' | 'loups'>(night && showWolfTab ? 'loups' : 'public');
   const [text, setText] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setTab(night && isWolf ? 'loups' : 'public');
-  }, [night, isWolf]);
+    setTab(night && showWolfTab ? 'loups' : 'public');
+  }, [night, showWolfTab]);
 
   const messages = tab === 'public' ? publicMessages : wolfMessages;
-  const canWrite = tab === 'public' ? !night : night && isWolf;
+  const canWrite = tab === 'public' ? canWritePublic : canWriteWolves;
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
@@ -34,13 +36,14 @@ export function Chat({ phase, isWolf, pseudo, publicMessages, wolfMessages, onSe
         <button role="tab" aria-selected={tab === 'public'} className={tab === 'public' ? 'is-active' : ''} onClick={() => setTab('public')}>
           Place du village
         </button>
-        {isWolf && (
+        {showWolfTab && (
           <button role="tab" aria-selected={tab === 'loups'} className={tab === 'loups' ? 'is-active' : ''} onClick={() => setTab('loups')}>
             🐺 Meute {night && <span className="pulse-dot" />}
           </button>
         )}
       </div>
       <div className="chat__list" ref={listRef}>
+        {messages.length === 0 && <p className="chat__empty">Aucun message pour l’instant.</p>}
         {messages.map((m) => (
           <div key={m.id} className={`msg msg--${m.channel} ${m.author === pseudo ? 'msg--me' : ''}`}>
             {m.channel !== 'systeme' && <span className="msg__author">{m.author}</span>}
@@ -70,7 +73,9 @@ export function Chat({ phase, isWolf, pseudo, publicMessages, wolfMessages, onSe
                 ? 'Murmurez à la meute…'
                 : 'Parlez au village…'
               : tab === 'public'
-                ? 'Le village dort… silence.'
+                ? night
+                  ? 'Le village dort… silence.'
+                  : 'Vous ne pouvez plus parler.'
                 : 'La meute ne parle que la nuit.'
           }
         />
