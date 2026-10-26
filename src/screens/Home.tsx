@@ -46,8 +46,9 @@ export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, on
         </label>
 
         <nav className="home__menu">
-          <Button size="lg" onClick={onPlay}>
+          <Button size="lg" className="btn--stack" onClick={onPlay}>
             Jouer
+            <small>Partie d’entraînement contre des robots</small>
           </Button>
           <div className="home__row">
             <Button variant="ghost" onClick={onCreate}>
@@ -66,7 +67,7 @@ export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, on
             </Button>
           </div>
         </nav>
-        <p className="home__foot">De 6 à 16 joueurs · Version de démonstration (données fictives)</p>
+        <p className="home__foot">De 6 à 16 joueurs · Le multijoueur en ligne arrive bientôt : pour l’instant, les autres places sont tenues par des robots.</p>
       </div>
 
       {joinOpen && (

@@ -3,10 +3,15 @@ import { Button } from '../components/Button';
 import { RolePortrait } from '../components/RolePortrait';
 import { TopBar } from '../components/TopBar';
 import { play } from '../lib/audio';
-import { LOBBY_PLAYERS, ROLE_ORDER, ROLES } from '../lib/mock';
-import type { GameSettings, RoleId, TieRule } from '../lib/types';
+import { LOBBY_PLAYERS } from '../lib/mock';
+import { ROLE_ORDER, ROLES } from '../game/roles';
+import { BOT_NAMES } from '../game/useLocalGame';
+import type { GameSettings, Player, RoleId, TieRule } from '../lib/types';
+
+export type LobbyMode = 'robots' | 'enligne';
 
 interface Props {
+  mode: LobbyMode;
   code: string;
   pseudo: string;
   isHost: boolean;
@@ -31,9 +36,15 @@ function formatDuration(s: number) {
   return m ? `${m} min${r ? ` ${r}s` : ''}` : `${r} s`;
 }
 
-export function Lobby({ code, pseudo, isHost, onToggleHost, settings, onSettings, onBack, onLaunch }: Props) {
+export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSettings, onBack, onLaunch }: Props) {
   const [copied, setCopied] = useState(false);
-  const players = LOBBY_PLAYERS.map((p) => (p.isMe ? { ...p, name: pseudo || 'Vous', isHost } : { ...p, isHost: !isHost && p.id === 'p2' }));
+  const robots = mode === 'robots';
+  const players: Player[] = robots
+    ? [
+        { id: 'me', name: pseudo || 'Vous', online: true, isHost: true, isMe: true, alive: true },
+        ...BOT_NAMES.slice(0, settings.playerCount - 1).map((name, i) => ({ id: `b${i}`, name, online: true, isBot: true, alive: true })),
+      ]
+    : LOBBY_PLAYERS.map((p) => (p.isMe ? { ...p, name: pseudo || 'Vous', isHost } : { ...p, isHost: !isHost && p.id === 'p2' }));
   const link = `${window.location.origin}/?code=${code}`;
 
   const totalRoles = Object.values(settings.roles).reduce((a, b) => a + b, 0);
@@ -46,6 +57,11 @@ export function Lobby({ code, pseudo, isHost, onToggleHost, settings, onSettings
   const canLaunch = isHost && problems.length === 0;
 
   const set = (patch: Partial<GameSettings>) => onSettings({ ...settings, ...patch });
+  // Changer le nombre de joueurs ajuste le nombre de simples villageois.
+  const setPlayerCount = (count: number) => {
+    const diff = count - totalRoles;
+    set({ playerCount: count, roles: { ...settings.roles, villageois: Math.max(0, settings.roles.villageois + diff) } });
+  };
   const setRole = (role: RoleId, delta: number) => {
     const max = UNIQUE_ROLES.includes(role) ? 1 : 16;
     const next = Math.max(0, Math.min(max, settings.roles[role] + delta));
@@ -69,12 +85,24 @@ export function Lobby({ code, pseudo, isHost, onToggleHost, settings, onSettings
       <TopBar
         onBack={onBack}
         right={
-          <button className="chip chip--demo" onClick={onToggleHost} title="Démo : changer de point de vue">
-            Vue : {isHost ? 'Hôte' : 'Invité'}
-          </button>
+          robots ? undefined : (
+            <button className="chip chip--demo" onClick={onToggleHost} title="Démo : changer de point de vue">
+              Vue : {isHost ? 'Hôte' : 'Invité'}
+            </button>
+          )
         }
       />
 
+      {robots ? (
+        <section className="panel lobby__intro">
+          <span className="eyebrow">Partie d’entraînement</span>
+          <h1>Contre les robots de Vaucombe</h1>
+          <p className="muted">
+            Les autres villageois sont joués par l’ordinateur. Idéal pour apprendre les règles et tester les réglages avant de
+            jouer entre amis.
+          </p>
+        </section>
+      ) : (
       <section className="lobby__invite panel">
         <div>
           <span className="eyebrow">Code d’invitation</span>
@@ -86,12 +114,16 @@ export function Lobby({ code, pseudo, isHost, onToggleHost, settings, onSettings
             {copied ? '✓ Lien copié' : 'Copier le lien'}
           </Button>
         </div>
+        <p className="lobby__note">
+          Aperçu : le vrai multijoueur arrive à l’étape 5. En attendant, les places sont tenues par des robots.
+        </p>
       </section>
+      )}
 
       <div className="lobby__grid">
         <section className="panel lobby__players">
           <header className="panel__head">
-            <h2>Villageois présents</h2>
+            <h2>{robots ? 'Autour du feu' : 'Villageois présents'}</h2>
             <span className="badge">
               {players.length} / {settings.playerCount}
             </span>
@@ -105,12 +137,13 @@ export function Lobby({ code, pseudo, isHost, onToggleHost, settings, onSettings
                   {p.isMe && pseudo && <small> (vous)</small>}
                 </span>
                 {p.isHost && <span className="tag tag--host">♛ Hôte</span>}
+                {p.isBot && <span className="tag">⚙ Robot</span>}
                 <span className={`status ${p.online ? 'status--on' : 'status--off'}`}>
                   {p.online ? 'En ligne' : 'Reconnexion…'}
                 </span>
               </li>
             ))}
-            {Array.from({ length: Math.max(0, settings.playerCount - players.length) }, (_, i) => (
+            {!robots && Array.from({ length: Math.max(0, settings.playerCount - players.length) }, (_, i) => (
               <li key={`e${i}`} className="player-row player-row--empty">
                 <span className="avatar avatar--empty">?</span>
                 <span className="player-row__name">En attente d’un joueur…</span>
@@ -164,7 +197,7 @@ export function Lobby({ code, pseudo, isHost, onToggleHost, settings, onSettings
                 min={6}
                 max={16}
                 value={settings.playerCount}
-                onChange={(e) => set({ playerCount: Number(e.target.value) })}
+                onChange={(e) => setPlayerCount(Number(e.target.value))}
               />
             </label>
 

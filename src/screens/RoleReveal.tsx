@@ -2,12 +2,15 @@ import { useState } from 'react';
 import { Button } from '../components/Button';
 import { RolePortrait } from '../components/RolePortrait';
 import { play } from '../lib/audio';
-import { MY_ROLE, ROLES, TABLE_PLAYERS } from '../lib/mock';
+import { ROLES } from '../game/roles';
+import { human } from '../game/helpers';
+import type { GameState } from '../game/types';
 
-export function RoleReveal({ onReady }: { onReady: () => void }) {
+export function RoleReveal({ game, onReady }: { game: GameState; onReady: () => void }) {
   const [flipped, setFlipped] = useState(false);
-  const role = ROLES[MY_ROLE];
-  const packmates = TABLE_PLAYERS.filter((p) => p.role === 'loup' && !p.isMe);
+  const me = human(game)!;
+  const role = ROLES[me.role];
+  const packmates = game.players.filter((p) => p.role === 'loup' && !p.isHuman);
 
   return (
     <div className="reveal">
@@ -51,6 +54,7 @@ export function RoleReveal({ onReady }: { onReady: () => void }) {
         <span className={`camp camp--${role.camp}`}>{role.camp === 'loups' ? 'Camp des loups' : 'Camp du village'}</span>
         <p className="reveal__tagline">« {role.tagline} »</p>
         <p>{role.description}</p>
+        {role.id === 'loup' && packmates.length === 0 && <p className="pack">Vous êtes le seul loup de la partie.</p>}
         {role.id === 'loup' && packmates.length > 0 && (
           <p className="pack">
             Votre meute : <strong>{packmates.map((p) => p.name).join(', ')}</strong>
