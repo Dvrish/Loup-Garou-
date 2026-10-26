@@ -1,57 +1,123 @@
-// Moteur de règles de la partie locale. Toutes les fonctions publiques sont pures :
-// elles reçoivent un état et renvoient un nouvel état, sans rien modifier d'autre.
-// À l'étape 3, ce moteur sera formalisé en machine à états et couvert de tests ;
-// à l'étape 4, les mêmes contrôles seront faits côté serveur.
+// Moteur de jeu : une machine à états explicite, en TypeScript pur.
+//
+// - Toutes les fonctions publiques sont pures : elles reçoivent un état et un événement
+//   et renvoient un nouvel état, sans rien modifier d'autre.
+// - Le hasard est tiré d'une graine stockée dans l'état : même état + mêmes événements
+//   ⇒ exactement la même partie (utile pour les tests, et plus tard pour le serveur).
+// - Chaque changement de phase passe par `goto`, qui refuse toute transition absente
+//   de la table TRANSITIONS. Le schéma est dans docs/machine-a-etats.md.
 import { botCupidChoice, botHunterTarget, botSeerTarget, botVote, botWitchDecision, botWolfTarget, createMemory } from './bots';
-import { aliveWithRole, alivePlayers, byId, human, isMixedCouple, loverOf } from './helpers';
+import { aliveWithRole, alivePlayers, byId, findPlayer, isAlive, isMixedCouple, loverOf } from './helpers';
 import { planDebateChat, planWolfChat, reactToHuman, say } from './lines';
-import { pick, shuffle } from './rng';
+import { pick, rand, shuffle } from './rng';
 import { ROLE_ORDER, ROLES } from './roles';
-import { NIGHT_PHASES, type Ctx, type DeathCause, type GameState, type Phase, type Winner } from './types';
+import {
+  NIGHT_PHASES,
+  TRANSIENT_PHASES,
+  type DeathCause,
+  type GameEvent,
+  type GameState,
+  type Phase,
+  type PlayerAction,
+  type Winner,
+} from './types';
 import type { GameSettings, RoleId } from '../lib/types';
 
-/** Temps de « réflexion » des robots quand l'humain n'a rien à faire. */
+/** Temps de « réflexion » des robots quand aucun humain n'a à agir. */
 export const BOT_PAUSE = 2600;
-const DAWN_MS = 8000;
-const VERDICT_MS = 6000;
-const HUNTER_MS = 30000;
+export const DAWN_MS = 8000;
+export const VERDICT_MS = 6000;
+export const HUNTER_MS = 30000;
+/** Durée du débat quand plus aucun humain n'est en vie. */
+export const SPECTATOR_DEBATE_MS = 10000;
+export const MAX_CHAT_LENGTH = 240;
+
+// ================================================================ table des transitions
+
+export const TRANSITIONS: Record<Phase, readonly Phase[]> = {
+  lobby: ['attribution'],
+  attribution: ['cupidon', 'voyante', 'loups'],
+  cupidon: ['voyante', 'loups'],
+  voyante: ['loups'],
+  loups: ['sorciere', 'resolution-nuit'],
+  sorciere: ['resolution-nuit'],
+  'resolution-nuit': ['aube'],
+  aube: ['chasseur', 'verification'],
+  chasseur: ['chasseur', 'verification'],
+  verification: ['debat', 'voyante', 'loups', 'fin'],
+  debat: ['vote'],
+  vote: ['resolution-vote'],
+  'resolution-vote': ['vote', 'verdict'],
+  verdict: ['chasseur', 'verification'],
+  fin: [],
+};
+
+export const isNight = (phase: Phase) => (NIGHT_PHASES as readonly Phase[]).includes(phase);
+const DAY_CHAT_PHASES: Phase[] = ['aube', 'chasseur', 'debat', 'vote', 'verdict'];
+const SKIPPABLE: Phase[] = ['aube', 'debat', 'verdict'];
+
+function goto(s: GameState, to: Phase, now: number) {
+  if (!TRANSITIONS[s.phase].includes(to)) throw new Error(`Transition interdite : ${s.phase} → ${to}`);
+  s.history.push({ from: s.phase, to, day: s.day, at: now });
+  s.phase = to;
+}
+
+/** Installe une phase « avec chrono » : durée, joueurs attendus, durée minimale. */
+function rest(s: GameState, now: number, durationMs: number, pending: string[], minMs = 0) {
+  s.phaseEndsAt = now + durationMs;
+  s.minEndsAt = now + minMs;
+  s.pending = pending;
+  s.done = [];
+}
 
 const clone = (s: GameState): GameState => structuredClone(s);
+const rngOf = (s: GameState) => () => rand(s);
 
-// ---------------------------------------------------------------- création
+// ================================================================ réglages et création
+
+/** Problèmes empêchant de lancer une partie avec ces réglages (liste vide = tout va bien). */
+export function settingsProblems(settings: GameSettings): string[] {
+  const problems: string[] = [];
+  const total = ROLE_ORDER.reduce((sum, r) => sum + settings.roles[r], 0);
+  const wolves = settings.roles.loup;
+  if (settings.playerCount < 6 || settings.playerCount > 16) problems.push('Il faut entre 6 et 16 joueurs.');
+  if (total !== settings.playerCount) problems.push(`Il y a ${total} rôle(s) pour ${settings.playerCount} joueurs.`);
+  if (wolves < 1) problems.push('Il faut au moins un loup-garou.');
+  if (wolves * 2 >= settings.playerCount) problems.push('Trop de loups : ils doivent être moins de la moitié.');
+  for (const r of ['voyante', 'sorciere', 'chasseur', 'cupidon'] as const) {
+    if (settings.roles[r] > 1) problems.push(`Le rôle ${ROLES[r].name} ne peut être présent qu’une fois.`);
+  }
+  return problems;
+}
 
 export function createGame(opts: {
   settings: GameSettings;
-  humanName: string | null;
+  /** Pseudos des joueurs humains (le premier est l'hôte). */
+  humans: string[];
   botNames: string[];
-  ctx: Ctx;
+  seed: number;
+  now: number;
 }): GameState {
-  const { settings, humanName, botNames, ctx } = opts;
-  const roleList: RoleId[] = ROLE_ORDER.flatMap((r) => Array<RoleId>(settings.roles[r]).fill(r));
-  while (roleList.length < settings.playerCount) roleList.push('villageois');
-  const roles = shuffle(roleList.slice(0, settings.playerCount), ctx.rng);
-  const names = humanName !== null ? [humanName, ...botNames] : botNames;
+  const { settings, humans, botNames, now } = opts;
+  const problems = settingsProblems(settings);
+  if (problems.length) throw new Error(problems[0]);
+  if (humans.length > settings.playerCount) throw new Error('Plus de joueurs humains que de places.');
 
   const s: GameState = {
     settings,
-    players: roles.map((role, i) => ({
-      id: `p${i}`,
-      name: names[i] ?? `Robot ${i}`,
-      role,
-      alive: true,
-      isHuman: humanName !== null && i === 0,
-    })),
-    humanId: humanName !== null ? 'p0' : null,
-    phase: 'attribution',
+    players: [],
+    hostId: humans.length ? 'p0' : null,
+    seed: opts.seed >>> 0,
+    phase: 'lobby',
     day: 1,
-    phaseEndsAt: ctx.now,
-    minEndsAt: ctx.now,
-    waitingHuman: false,
-    humanDone: false,
+    phaseEndsAt: now,
+    minEndsAt: now,
+    pending: [],
+    done: [],
     lovers: null,
-    cupidChoice: [],
+    cupidChoice: null,
+    wolfVotes: {},
     wolfTarget: null,
-    wolfSuggestions: {},
     witch: { life: true, death: true, saveTonight: false, killTonight: null },
     seerResults: {},
     votes: {},
@@ -60,39 +126,31 @@ export function createGame(opts: {
     deaths: [],
     hunterQueue: [],
     hunterShot: null,
-    afterHunter: 'debat',
+    afterVerification: 'debat',
     messages: [],
     notes: [],
     memory: {},
     announcement: 'Les rôles sont distribués…',
     winner: null,
+    history: [],
   };
-  for (const p of s.players) if (!p.isHuman) s.memory[p.id] = createMemory(s, p.id, ctx.rng);
+
+  const roleList: RoleId[] = ROLE_ORDER.flatMap((r) => Array<RoleId>(settings.roles[r]).fill(r));
+  const roles = shuffle(roleList, rngOf(s));
+  const names = [...humans, ...botNames];
+  s.players = roles.map((role, i) => ({
+    id: `p${i}`,
+    name: names[i] ?? `Robot ${i}`,
+    role,
+    alive: true,
+    isHuman: i < humans.length,
+  }));
+  for (const p of s.players) if (!p.isHuman) s.memory[p.id] = createMemory(s, p.id, rngOf(s));
+  goto(s, 'attribution', now);
   return s;
 }
 
-/** Fin de l'attribution : la première nuit commence. */
-export function startGame(s0: GameState, ctx: Ctx): GameState {
-  const s = clone(s0);
-  if (s.phase !== 'attribution') return s0;
-  say(s, 'Meneur', 'La nuit tombe sur Vaucombe… Fermez les yeux.', 'systeme', ctx.now);
-  return startNight(s, ctx);
-}
-
-// ---------------------------------------------------------------- outils internes
-
-function enter(s: GameState, phase: Phase, ctx: Ctx, durationMs: number, waitingHuman: boolean, minMs = 0) {
-  s.phase = phase;
-  s.phaseEndsAt = ctx.now + durationMs;
-  s.minEndsAt = ctx.now + minMs;
-  s.waitingHuman = waitingHuman;
-  s.humanDone = false;
-}
-
-function humanHasRole(s: GameState, role: RoleId) {
-  const h = human(s);
-  return !!h && h.alive && h.role === role;
-}
+// ================================================================ morts et victoire
 
 const roleName = (s: GameState, id: string) => ROLES[byId(s, id).role].name;
 
@@ -113,7 +171,7 @@ function deathLine(s: GameState, id: string, cause: DeathCause) {
   }
 }
 
-/** Tue un joueur, révèle son rôle et déclenche les effets (chasseur, amoureux). */
+/** Tue un joueur, révèle son rôle à tous et déclenche les effets (chasseur, amoureux). */
 function kill(s: GameState, id: string, cause: DeathCause, votes: Record<string, string> = {}) {
   const p = byId(s, id);
   if (!p.alive) return;
@@ -130,12 +188,10 @@ function kill(s: GameState, id: string, cause: DeathCause, votes: Record<string,
   }
   if (p.role === 'chasseur') s.hunterQueue.push(id);
   const lover = loverOf(s, id);
-  if (lover && byId(s, lover).alive) kill(s, lover, 'chagrin');
+  if (lover && isAlive(s, lover)) kill(s, lover, 'chagrin');
 }
 
-function announceNewDeaths(s: GameState, from: number) {
-  return s.deaths.slice(from).map((d) => deathLine(s, d.id, d.cause));
-}
+const newDeathLines = (s: GameState, from: number) => s.deaths.slice(from).map((d) => deathLine(s, d.id, d.cause));
 
 export function checkWinner(s: GameState): Winner | null {
   const alive = alivePlayers(s);
@@ -154,67 +210,87 @@ const WIN_TEXT: Record<Winner, string> = {
   aucun: 'Plus personne ne respire à Vaucombe…',
 };
 
-function finish(s: GameState, w: Winner, ctx: Ctx) {
-  s.winner = w;
-  s.phase = 'fin';
-  s.phaseEndsAt = ctx.now;
-  s.waitingHuman = false;
-  s.announcement = WIN_TEXT[w];
-  say(s, 'Meneur', s.announcement, 'systeme', ctx.now);
-  return s;
-}
+// ================================================================ nuit
 
-// ---------------------------------------------------------------- nuit
-
-const NARRATION: Record<string, string> = {
+const NARRATION: Record<(typeof NIGHT_PHASES)[number], string> = {
   cupidon: 'Cupidon se réveille et désigne deux amoureux…',
   voyante: 'La voyante se réveille et sonde une âme…',
   loups: 'Les loups-garous se réveillent et choisissent leur victime…',
   sorciere: 'La sorcière se réveille et contemple ses potions…',
 };
 
-const actorOf = (phase: Phase): RoleId => (phase === 'loups' ? 'loup' : (phase as RoleId));
+const ACTOR: Record<(typeof NIGHT_PHASES)[number], RoleId> = {
+  cupidon: 'cupidon',
+  voyante: 'voyante',
+  loups: 'loup',
+  sorciere: 'sorciere',
+};
 
-function nightStepActive(s: GameState, phase: Phase) {
-  switch (phase) {
-    case 'cupidon':
-      return s.day === 1 && !s.lovers && !!aliveWithRole(s, 'cupidon');
-    case 'voyante':
-      return !!aliveWithRole(s, 'voyante');
-    case 'loups':
-      return !!aliveWithRole(s, 'loup');
-    case 'sorciere':
-      return !!aliveWithRole(s, 'sorciere') && (s.witch.life || s.witch.death);
-    default:
-      return false;
-  }
+function nightStepActive(s: GameState, phase: (typeof NIGHT_PHASES)[number]) {
+  const someone = aliveWithRole(s, ACTOR[phase]).length > 0;
+  if (phase === 'cupidon') return someone && s.day === 1 && !s.lovers;
+  if (phase === 'sorciere') return someone && (s.witch.life || s.witch.death);
+  return someone;
 }
 
-function startNight(s: GameState, ctx: Ctx) {
+function startNight(s: GameState, now: number) {
+  s.wolfVotes = {};
   s.wolfTarget = null;
-  s.wolfSuggestions = {};
   s.witch.saveTonight = false;
   s.witch.killTonight = null;
   s.votes = {};
   s.runoff = null;
   s.eliminatedToday = null;
-  s.cupidChoice = [];
-  return nextNightStep(s, ctx, null);
+  s.cupidChoice = null;
+  s.hunterShot = null;
+  return nextNightStep(s, now, null);
 }
 
-function nextNightStep(s: GameState, ctx: Ctx, after: Phase | null): GameState {
+function nextNightStep(s: GameState, now: number, after: (typeof NIGHT_PHASES)[number] | null): GameState {
   for (let i = after ? NIGHT_PHASES.indexOf(after) + 1 : 0; i < NIGHT_PHASES.length; i++) {
-    if (nightStepActive(s, NIGHT_PHASES[i])) return startNightStep(s, ctx, NIGHT_PHASES[i]);
+    if (nightStepActive(s, NIGHT_PHASES[i])) return enterNightStep(s, now, NIGHT_PHASES[i]);
   }
-  return resolveNight(s, ctx);
+  return resolveNight(s, now);
 }
 
-function wolfMajority(s: GameState, ctx: Ctx): string | null {
+function enterNightStep(s: GameState, now: number, phase: (typeof NIGHT_PHASES)[number]) {
+  goto(s, phase, now);
+  const actors = aliveWithRole(s, ACTOR[phase]);
+  const humans = actors.filter((p) => p.isHuman).map((p) => p.id);
+  const bots = actors.filter((p) => !p.isHuman);
+  const rng = rngOf(s);
+  rest(s, now, humans.length ? s.settings.nightSeconds * 1000 : BOT_PAUSE, humans);
+  s.announcement = NARRATION[phase];
+
+  if (phase === 'cupidon' && bots[0]) s.cupidChoice = botCupidChoice(s, bots[0].id, rng);
+  if (phase === 'voyante' && bots[0]) {
+    const t = botSeerTarget(s, bots[0].id, rng);
+    if (t) s.memory[bots[0].id].known[t] = byId(s, t).role;
+  }
+  if (phase === 'loups') {
+    for (const b of bots) {
+      const t = botWolfTarget(s, b.id, rng);
+      if (t) s.wolfVotes[b.id] = t;
+    }
+    if (s.settings.discussionMode === 'chat') planWolfChat(s, now, rng);
+  }
+  if (phase === 'sorciere' && bots[0]) {
+    const d = botWitchDecision(s, bots[0].id, rng);
+    applyWitch(s, d.save, d.kill);
+  }
+  return s;
+}
+
+/** Victime de la meute : le choix le plus fréquent parmi les loups vivants (tirage en cas d'égalité). */
+function wolfMajority(s: GameState): string | null {
   const count: Record<string, number> = {};
-  for (const t of Object.values(s.wolfSuggestions)) count[t] = (count[t] ?? 0) + 1;
+  for (const [wolf, target] of Object.entries(s.wolfVotes)) {
+    if (!isAlive(s, wolf) || !isAlive(s, target) || byId(s, target).role === 'loup') continue;
+    count[target] = (count[target] ?? 0) + 1;
+  }
   const max = Math.max(0, ...Object.values(count));
-  const top = Object.keys(count).filter((t) => count[t] === max && byId(s, t).alive);
-  return top.length ? pick(top, ctx.rng) : null;
+  const top = Object.keys(count).filter((t) => count[t] === max);
+  return top.length ? pick(top, rngOf(s)) : null;
 }
 
 function applyWitch(s: GameState, save: boolean, killId: string | null) {
@@ -222,110 +298,147 @@ function applyWitch(s: GameState, save: boolean, killId: string | null) {
     s.witch.saveTonight = true;
     s.witch.life = false;
   }
-  if (killId && s.witch.death && byId(s, killId).alive) {
+  if (killId && s.witch.death && isAlive(s, killId)) {
     s.witch.killTonight = killId;
     s.witch.death = false;
   }
 }
 
-function startNightStep(s: GameState, ctx: Ctx, phase: Phase) {
-  const role = actorOf(phase);
-  const humanActs = humanHasRole(s, role);
-  enter(s, phase, ctx, humanActs ? s.settings.nightSeconds * 1000 : BOT_PAUSE, humanActs);
-  s.announcement = NARRATION[phase];
-  const bots = s.players.filter((p) => p.alive && !p.isHuman && p.role === role);
-  const bot = bots[0];
-
-  if (phase === 'cupidon' && !humanActs && bot) s.cupidChoice = botCupidChoice(s, bot.id, ctx.rng);
-  if (phase === 'voyante' && !humanActs && bot) {
-    const t = botSeerTarget(s, bot.id, ctx.rng);
-    if (t) s.memory[bot.id].known[t] = byId(s, t).role;
-  }
-  if (phase === 'loups') {
-    for (const b of bots) {
-      const t = botWolfTarget(s, b.id, ctx.rng);
-      if (t) s.wolfSuggestions[b.id] = t;
+function endNightStep(s: GameState, now: number, phase: (typeof NIGHT_PHASES)[number]) {
+  if (phase === 'cupidon') {
+    const choice = s.cupidChoice ?? (shuffle(alivePlayers(s), rngOf(s)).slice(0, 2).map((p) => p.id) as [string, string]);
+    s.lovers = choice;
+    const [a, b] = choice;
+    for (const [me, other] of [
+      [a, b],
+      [b, a],
+    ]) {
+      if (byId(s, me).isHuman)
+        s.notes.push({
+          playerId: me,
+          at: now,
+          text: `Une flèche de Cupidon vous lie à ${byId(s, other).name} (${roleName(s, other)}). Si l’un de vous meurt, l’autre meurt de chagrin.`,
+        });
     }
-    planWolfChat(s, ctx);
-    if (!humanActs) s.wolfTarget = wolfMajority(s, ctx);
+    const cupid = aliveWithRole(s, 'cupidon')[0];
+    if (cupid?.isHuman) s.notes.push({ playerId: cupid.id, at: now, text: `Vous avez uni ${byId(s, a).name} et ${byId(s, b).name}.` });
   }
-  if (phase === 'sorciere' && !humanActs && bot) {
-    const d = botWitchDecision(s, bot.id, ctx.rng);
-    applyWitch(s, d.save, d.kill);
-  }
-  return s;
+  if (phase === 'loups') s.wolfTarget = wolfMajority(s);
+  if (phase === 'sorciere') return resolveNight(s, now);
+  return nextNightStep(s, now, phase);
 }
 
-function resolveNight(s: GameState, ctx: Ctx) {
+function resolveNight(s: GameState, now: number) {
+  goto(s, 'resolution-nuit', now);
   const before = s.deaths.length;
   if (s.wolfTarget && !s.witch.saveTonight) kill(s, s.wolfTarget, 'loups');
   if (s.witch.killTonight) kill(s, s.witch.killTonight, 'poison');
-  const lines = announceNewDeaths(s, before);
+  const lines = newDeathLines(s, before);
   s.announcement = `Le village se réveille. ${lines.length ? lines.join(' ') : 'Miracle : personne n’est mort cette nuit.'}`;
-  say(s, 'Meneur', s.announcement, 'systeme', ctx.now);
-  enter(s, 'aube', ctx, DAWN_MS, false);
+  say(s, 'Meneur', s.announcement, 'systeme', now);
+  goto(s, 'aube', now);
+  rest(s, now, DAWN_MS, []);
+  s.afterVerification = 'debat';
   return s;
 }
 
-// ---------------------------------------------------------------- jour
+// ================================================================ chasseur et vérification
 
-function continueAfterDeaths(s: GameState, ctx: Ctx, next: 'debat' | 'nuit'): GameState {
+function afterDeaths(s: GameState, now: number): GameState {
   if (s.hunterQueue.length) {
     const hunter = byId(s, s.hunterQueue[0]);
-    s.afterHunter = next;
+    goto(s, 'chasseur', now);
     s.hunterShot = null;
-    enter(s, 'chasseur', ctx, hunter.isHuman ? HUNTER_MS : BOT_PAUSE, hunter.isHuman);
+    rest(s, now, hunter.isHuman ? HUNTER_MS : BOT_PAUSE, hunter.isHuman ? [hunter.id] : []);
     s.announcement = `${hunter.name}, le chasseur, rassemble ses dernières forces pour tirer…`;
     return s;
   }
-  const w = checkWinner(s);
-  if (w) return finish(s, w, ctx);
-  if (next === 'debat') return startDebate(s, ctx);
-  s.day += 1;
-  say(s, 'Meneur', `La nuit ${s.day} tombe sur Vaucombe… Fermez les yeux.`, 'systeme', ctx.now);
-  return startNight(s, ctx);
+  return verify(s, now);
 }
 
-function startDebate(s: GameState, ctx: Ctx) {
-  const ms = human(s)?.alive ? s.settings.daySeconds * 1000 : 10000;
-  enter(s, 'debat', ctx, ms, false);
+function endHunter(s: GameState, now: number) {
+  const hunter = byId(s, s.hunterQueue.shift()!);
+  let target = s.hunterShot;
+  if (!hunter.isHuman) target = botHunterTarget(s, hunter.id, rngOf(s));
+  const before = s.deaths.length;
+  if (target && isAlive(s, target)) kill(s, target, 'chasseur');
+  const lines = newDeathLines(s, before);
+  say(s, 'Meneur', lines.length ? `${hunter.name} tire une dernière fois. ${lines.join(' ')}` : `${hunter.name} meurt sans tirer.`, 'systeme', now);
+  s.hunterShot = null;
+  return afterDeaths(s, now);
+}
+
+function verify(s: GameState, now: number): GameState {
+  goto(s, 'verification', now);
+  const w = checkWinner(s);
+  if (w) {
+    goto(s, 'fin', now);
+    s.winner = w;
+    rest(s, now, 0, []);
+    s.announcement = WIN_TEXT[w];
+    say(s, 'Meneur', s.announcement, 'systeme', now);
+    return s;
+  }
+  if (s.afterVerification === 'debat') return enterDebate(s, now);
+  s.day += 1;
+  say(s, 'Meneur', `La nuit ${s.day} tombe sur Vaucombe… Fermez les yeux.`, 'systeme', now);
+  return startNight(s, now);
+}
+
+// ================================================================ jour
+
+const aliveHumans = (s: GameState) => alivePlayers(s).filter((p) => p.isHuman);
+
+function enterDebate(s: GameState, now: number) {
+  goto(s, 'debat', now);
+  const ms = aliveHumans(s).length ? s.settings.daySeconds * 1000 : SPECTATOR_DEBATE_MS;
+  rest(s, now, ms, []);
   s.announcement = `Jour ${s.day} : le village débat. Qui sont les loups ?`;
-  planDebateChat(s, ctx, Math.min(ms * 0.7, 60000));
+  planDebateChat(s, now, rngOf(s), Math.min(ms * 0.7, 60000));
   return s;
 }
 
-function startVote(s: GameState, ctx: Ctx, runoff: string[] | null) {
+function enterVote(s: GameState, now: number, runoff: string[] | null) {
+  goto(s, 'vote', now);
   s.runoff = runoff;
   s.votes = {};
   const candidates = runoff ?? alivePlayers(s).map((p) => p.id);
   const voteMs = s.settings.voteSeconds * 1000;
   const window = Math.min(voteMs * 0.5, 9000);
-  let last = ctx.now;
+  const rng = rngOf(s);
+  let last = now;
   for (const bot of alivePlayers(s).filter((p) => !p.isHuman)) {
-    const at = ctx.now + 800 + ctx.rng() * window;
-    s.votes[bot.id] = { target: botVote(s, bot.id, candidates, ctx.rng), at };
+    const at = Math.round(now + 800 + rng() * window);
+    s.votes[bot.id] = { target: botVote(s, bot.id, candidates, rng), at };
     last = Math.max(last, at);
   }
-  const humanVotes = !!human(s)?.alive;
-  enter(s, 'vote', ctx, humanVotes ? voteMs : Math.min(voteMs, last - ctx.now + 1500), humanVotes, last - ctx.now + 600);
+  const humans = aliveHumans(s).map((p) => p.id);
+  rest(s, now, humans.length ? voteMs : Math.min(voteMs, last - now + 1500), humans, last - now + 600);
   s.announcement = runoff
     ? `Égalité ! Second vote entre ${runoff.map((id) => byId(s, id).name).join(' et ')}.`
     : 'Le village vote. Qui doit être éliminé ?';
   return s;
 }
 
-function resolveVote(s: GameState, ctx: Ctx) {
-  const tally: Record<string, number> = {};
-  const plain: Record<string, string> = {};
+/** Décompte des voix valides (votants vivants, cibles vivantes, candidats du second tour). */
+export function tally(s: GameState) {
+  const count: Record<string, number> = {};
+  const valid: Record<string, string> = {};
   for (const [voter, v] of Object.entries(s.votes)) {
-    if (!byId(s, voter).alive || v.target === 'abstention' || !byId(s, v.target).alive) continue;
+    if (!isAlive(s, voter) || v.target === 'abstention' || !isAlive(s, v.target)) continue;
     if (s.runoff && !s.runoff.includes(v.target)) continue;
-    tally[v.target] = (tally[v.target] ?? 0) + 1;
-    plain[voter] = v.target;
+    count[v.target] = (count[v.target] ?? 0) + 1;
+    valid[voter] = v.target;
   }
-  const max = Math.max(0, ...Object.values(tally));
-  const top = max ? Object.keys(tally).filter((id) => tally[id] === max) : [];
-  const summary = Object.entries(tally)
+  return { count, valid };
+}
+
+function resolveVote(s: GameState, now: number) {
+  goto(s, 'resolution-vote', now);
+  const { count, valid } = tally(s);
+  const max = Math.max(0, ...Object.values(count));
+  const top = max ? Object.keys(count).filter((id) => count[id] === max) : [];
+  const summary = Object.entries(count)
     .sort((a, b) => b[1] - a[1])
     .map(([id, n]) => `${byId(s, id).name} (${n})`)
     .join(', ');
@@ -335,160 +448,184 @@ function resolveVote(s: GameState, ctx: Ctx) {
   if (top.length === 1) eliminated = top[0];
   else if (top.length > 1) {
     if (s.settings.tieRule === 'hasard') {
-      eliminated = pick(top, ctx.rng);
+      eliminated = pick(top, rngOf(s));
       tieText = 'Égalité : le sort a tranché. ';
     } else if (s.settings.tieRule === 'revote' && !s.runoff) {
-      say(s, 'Meneur', `Votes : ${summary}. Égalité, un second vote départage les ex æquo.`, 'systeme', ctx.now);
-      return startVote(s, ctx, top);
+      say(s, 'Meneur', `Votes : ${summary}. Égalité, un second vote départage les ex æquo.`, 'systeme', now);
+      return enterVote(s, now, top);
     } else tieText = 'Égalité : personne n’est éliminé. ';
   }
 
   const before = s.deaths.length;
   s.eliminatedToday = eliminated;
-  if (eliminated) kill(s, eliminated, 'vote', plain);
-  const lines = announceNewDeaths(s, before);
+  if (eliminated) kill(s, eliminated, 'vote', valid);
+  const lines = newDeathLines(s, before);
   s.announcement = `${summary ? `Votes : ${summary}. ` : 'Aucun vote. '}${tieText}${
     lines.length ? lines.join(' ') : eliminated ? '' : 'Le village n’élimine personne aujourd’hui.'
   }`.trim();
-  say(s, 'Meneur', s.announcement, 'systeme', ctx.now);
-  enter(s, 'verdict', ctx, VERDICT_MS, false);
+  say(s, 'Meneur', s.announcement, 'systeme', now);
+  goto(s, 'verdict', now);
+  rest(s, now, VERDICT_MS, []);
+  s.afterVerification = 'nuit';
   return s;
 }
 
-// ---------------------------------------------------------------- avancer le temps
+// ================================================================ temps qui passe
 
-/** La phase peut-elle se terminer maintenant ? */
+/** La phase courante peut-elle se terminer à l'heure `now` ? */
 export function canEnd(s: GameState, now: number) {
-  if (s.phase === 'attribution' || s.phase === 'fin') return false;
+  if (s.phase === 'attribution' || s.phase === 'fin' || TRANSIENT_PHASES.includes(s.phase)) return false;
   if (now >= s.phaseEndsAt) return true;
-  return s.waitingHuman && s.humanDone && now >= s.minEndsAt;
+  return s.pending.length > 0 && s.pending.every((id) => s.done.includes(id)) && now >= s.minEndsAt;
 }
 
-/** Termine la phase en cours (chrono écoulé ou tout le monde a agi) et passe à la suivante. */
-export function endPhase(s0: GameState, ctx: Ctx): GameState {
-  const s = clone(s0);
+function endPhase(s: GameState, now: number): GameState {
   switch (s.phase) {
-    case 'cupidon': {
-      if (s.cupidChoice.length !== 2) s.cupidChoice = shuffle(alivePlayers(s), ctx.rng).slice(0, 2).map((p) => p.id);
-      const [a, b] = s.cupidChoice;
-      s.lovers = [a, b];
-      const h = human(s);
-      const partner = h ? loverOf(s, h.id) : null;
-      if (partner)
-        s.notes.push({
-          at: ctx.now,
-          text: `Une flèche de Cupidon vous lie à ${byId(s, partner).name} (${roleName(s, partner)}). Si l’un de vous meurt, l’autre meurt de chagrin.`,
-        });
-      return nextNightStep(s, ctx, 'cupidon');
-    }
+    case 'cupidon':
     case 'voyante':
-      return nextNightStep(s, ctx, 'voyante');
     case 'loups':
-      if (!s.wolfTarget) s.wolfTarget = wolfMajority(s, ctx);
-      return nextNightStep(s, ctx, 'loups');
     case 'sorciere':
-      return resolveNight(s, ctx);
+      return endNightStep(s, now, s.phase);
     case 'aube':
-      return continueAfterDeaths(s, ctx, 'debat');
-    case 'chasseur': {
-      const hunter = byId(s, s.hunterQueue.shift()!);
-      let target = s.hunterShot;
-      if (!target && !hunter.isHuman) target = botHunterTarget(s, hunter.id, ctx.rng);
-      const before = s.deaths.length;
-      if (target && byId(s, target).alive) kill(s, target, 'chasseur');
-      const lines = announceNewDeaths(s, before);
-      say(s, 'Meneur', lines.length ? `${hunter.name} tire une dernière fois. ${lines.join(' ')}` : `${hunter.name} meurt sans tirer.`, 'systeme', ctx.now);
-      s.hunterShot = null;
-      return continueAfterDeaths(s, ctx, s.afterHunter);
-    }
-    case 'debat':
-      return startVote(s, ctx, null);
-    case 'vote':
-      return resolveVote(s, ctx);
     case 'verdict':
-      return continueAfterDeaths(s, ctx, 'nuit');
+      return afterDeaths(s, now);
+    case 'chasseur':
+      return endHunter(s, now);
+    case 'debat':
+      return enterVote(s, now, null);
+    case 'vote':
+      return resolveVote(s, now);
     default:
-      return s0;
+      return s;
   }
 }
 
-// ---------------------------------------------------------------- actions du joueur humain
+// ================================================================ actions des joueurs
 
-export type HumanAction =
-  | { type: 'cupidon'; targets: [string, string] }
-  | { type: 'voyante'; target: string }
-  | { type: 'loups'; target: string }
-  | { type: 'sorciere'; save: boolean; kill: string | null }
-  | { type: 'chasseur'; target: string | null }
-  | { type: 'vote'; target: string | 'abstention' }
-  | { type: 'chat'; channel: 'public' | 'loups'; text: string }
-  | { type: 'passer' };
-
-export const isNight = (phase: Phase) => NIGHT_PHASES.includes(phase);
-
-/** Applique une action du joueur humain si elle est autorisée ; sinon renvoie l'état inchangé. */
-export function act(s0: GameState, action: HumanAction, ctx: Ctx): GameState {
-  const h = human(s0);
-  if (!h) return s0;
-  const valid = (id: string | null) => !!id && s0.players.some((p) => p.id === id && p.alive);
-  const s = clone(s0);
-  const canAct = (phase: Phase) => s.phase === phase && s.waitingHuman && !s.humanDone;
+/** Vérifie qu'une action est permise. Renvoie la raison du refus, ou null si elle est valide. */
+export function validateAction(s: GameState, playerId: string, action: PlayerAction): string | null {
+  const p = findPlayer(s, playerId);
+  if (!p) return 'Joueur inconnu.';
+  if (!p.isHuman) return 'Ce joueur est un robot.';
+  if (s.phase === 'fin') return 'La partie est terminée.';
+  const myTurn = (phase: Phase) => s.phase === phase && s.pending.includes(playerId) && !s.done.includes(playerId);
+  const NOT_YOUR_TURN = 'Ce n’est pas à vous d’agir maintenant.';
+  const alive = (id: string | null) => isAlive(s, id);
 
   switch (action.type) {
     case 'cupidon': {
+      if (!myTurn('cupidon')) return NOT_YOUR_TURN;
       const [a, b] = action.targets;
-      if (!canAct('cupidon') || a === b || !valid(a) || !valid(b)) return s0;
-      s.cupidChoice = [a, b];
-      break;
+      if (a === b) return 'Choisissez deux joueurs différents.';
+      if (!alive(a) || !alive(b)) return 'Les amoureux doivent être vivants.';
+      return null;
     }
+    case 'voyante':
+      if (!myTurn('voyante')) return NOT_YOUR_TURN;
+      if (action.target === playerId) return 'Vous connaissez déjà votre rôle.';
+      if (!alive(action.target)) return 'Ce joueur n’est pas en vie.';
+      return null;
+    case 'loups':
+      if (!myTurn('loups')) return NOT_YOUR_TURN;
+      if (!alive(action.target)) return 'Ce joueur n’est pas en vie.';
+      if (byId(s, action.target).role === 'loup') return 'Un loup ne peut pas dévorer un autre loup.';
+      return null;
+    case 'sorciere':
+      if (!myTurn('sorciere')) return NOT_YOUR_TURN;
+      if (action.save && !s.witch.life) return 'La potion de vie est déjà utilisée.';
+      if (action.save && !s.wolfTarget) return 'Personne n’est à sauver cette nuit.';
+      if (action.kill) {
+        if (!s.witch.death) return 'La potion de mort est déjà utilisée.';
+        if (action.kill === playerId) return 'Vous ne pouvez pas vous empoisonner.';
+        if (!alive(action.kill)) return 'Ce joueur n’est pas en vie.';
+      }
+      return null;
+    case 'chasseur':
+      if (!myTurn('chasseur')) return NOT_YOUR_TURN;
+      if (action.target && (action.target === playerId || !alive(action.target))) return 'Cible invalide.';
+      return null;
+    case 'vote':
+      if (!myTurn('vote')) return NOT_YOUR_TURN;
+      if (action.target === 'abstention') return s.settings.allowAbstain ? null : 'L’abstention n’est pas autorisée.';
+      if (action.target === playerId) return 'Vous ne pouvez pas voter contre vous-même.';
+      if (!alive(action.target)) return 'Ce joueur n’est pas en vie.';
+      if (s.runoff && !s.runoff.includes(action.target)) return 'Ce second vote ne concerne que les ex æquo.';
+      return null;
+    case 'chat': {
+      const text = action.text.trim();
+      if (!p.alive) return 'Les morts ne parlent pas.';
+      if (s.settings.discussionMode !== 'chat') return 'Pas de chat en mode « même pièce ».';
+      if (!text) return 'Message vide.';
+      if (text.length > MAX_CHAT_LENGTH) return 'Message trop long.';
+      if (action.channel === 'public' && !DAY_CHAT_PHASES.includes(s.phase)) return 'Le village dort : silence.';
+      if (action.channel === 'loups' && (p.role !== 'loup' || !isNight(s.phase))) return 'Seule la meute parle la nuit.';
+      return null;
+    }
+    case 'passer':
+      if (playerId !== s.hostId) return 'Seul l’hôte peut passer cette étape.';
+      if (!SKIPPABLE.includes(s.phase)) return 'Cette étape ne peut pas être passée.';
+      return null;
+  }
+}
+
+function perform(s: GameState, playerId: string, action: PlayerAction, now: number) {
+  const me = byId(s, playerId);
+  const done = () => s.done.push(playerId);
+  switch (action.type) {
+    case 'cupidon':
+      s.cupidChoice = action.targets;
+      return done();
     case 'voyante': {
-      if (!canAct('voyante') || action.target === h.id || !valid(action.target)) return s0;
       const role = byId(s, action.target).role;
       s.seerResults[action.target] = role;
-      s.notes.push({ at: ctx.now, text: `Votre vision : ${byId(s, action.target).name} est ${ROLES[role].name}.` });
-      break;
+      s.notes.push({ playerId, at: now, text: `Votre vision : ${byId(s, action.target).name} est ${ROLES[role].name}.` });
+      return done();
     }
-    case 'loups': {
-      if (!canAct('loups') || !valid(action.target) || byId(s, action.target).role === 'loup') return s0;
-      s.wolfTarget = action.target;
-      say(s, h.name, `Je choisis ${byId(s, action.target).name}.`, 'loups', ctx.now);
-      break;
-    }
-    case 'sorciere': {
-      if (!canAct('sorciere')) return s0;
-      if (action.kill && (!valid(action.kill) || action.kill === h.id)) return s0;
+    case 'loups':
+      s.wolfVotes[playerId] = action.target;
+      // Les loups-robots se rallient au choix des humains de la meute.
+      for (const w of aliveWithRole(s, 'loup')) if (!w.isHuman) s.wolfVotes[w.id] = action.target;
+      if (s.settings.discussionMode === 'chat') say(s, me.name, `Je choisis ${byId(s, action.target).name}.`, 'loups', now);
+      return done();
+    case 'sorciere':
       applyWitch(s, action.save, action.kill);
-      break;
-    }
-    case 'chasseur': {
-      if (s.phase !== 'chasseur' || s.hunterQueue[0] !== h.id || s.humanDone) return s0;
-      if (action.target && (!valid(action.target) || action.target === h.id)) return s0;
+      return done();
+    case 'chasseur':
       s.hunterShot = action.target;
-      break;
-    }
-    case 'vote': {
-      if (!canAct('vote') || !h.alive) return s0;
-      if (action.target === 'abstention') {
-        if (!s.settings.allowAbstain) return s0;
-      } else if (action.target === h.id || !valid(action.target) || (s.runoff && !s.runoff.includes(action.target))) return s0;
-      s.votes[h.id] = { target: action.target, at: ctx.now };
-      break;
-    }
+      return done();
+    case 'vote':
+      s.votes[playerId] = { target: action.target, at: now };
+      return done();
     case 'chat': {
-      const text = action.text.trim().slice(0, 240);
-      if (!text || !h.alive || s.settings.discussionMode !== 'chat') return s0;
-      if (action.channel === 'public' && !['aube', 'chasseur', 'debat', 'vote', 'verdict'].includes(s.phase)) return s0;
-      if (action.channel === 'loups' && (h.role !== 'loup' || !isNight(s.phase))) return s0;
-      say(s, h.name, text, action.channel, ctx.now);
-      reactToHuman(s, ctx, action.channel, text);
-      return s; // un message ne termine pas la phase
+      const text = action.text.trim();
+      say(s, me.name, text, action.channel, now);
+      reactToHuman(s, now, rngOf(s), playerId, action.channel, text);
+      return;
     }
-    case 'passer': {
-      if (!['aube', 'debat', 'verdict'].includes(s.phase)) return s0;
-      s.phaseEndsAt = ctx.now;
+    case 'passer':
+      s.phaseEndsAt = now;
+      return;
+  }
+}
+
+// ================================================================ point d'entrée unique
+
+/** Fait évoluer la partie. Un événement refusé ou sans effet renvoie l'état tel quel. */
+export function applyEvent(s0: GameState, event: GameEvent): GameState {
+  switch (event.type) {
+    case 'demarrer': {
+      if (s0.phase !== 'attribution') return s0;
+      const s = clone(s0);
+      say(s, 'Meneur', 'La nuit tombe sur Vaucombe… Fermez les yeux.', 'systeme', event.now);
+      return startNight(s, event.now);
+    }
+    case 'tic':
+      return canEnd(s0, event.now) ? endPhase(clone(s0), event.now) : s0;
+    case 'action': {
+      if (validateAction(s0, event.playerId, event.action)) return s0;
+      const s = clone(s0);
+      perform(s, event.playerId, event.action, event.now);
       return s;
     }
   }
-  s.humanDone = true;
-  return s;
 }

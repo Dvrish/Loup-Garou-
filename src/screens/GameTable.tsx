@@ -5,22 +5,27 @@ import { Chat } from '../components/Chat';
 import { Modal } from '../components/Modal';
 import { RolePortrait } from '../components/RolePortrait';
 import { play } from '../lib/audio';
-import { isNight, type HumanAction } from '../game/engine';
-import { byId, human, loverOf } from '../game/helpers';
+import { isNight } from '../game/engine';
+import { byId, loverOf } from '../game/helpers';
 import { ROLES } from '../game/roles';
-import type { GameState, GPlayer, Phase } from '../game/types';
+import type { GameState, GPlayer, Phase, PlayerAction } from '../game/types';
 import type { RoleId } from '../lib/types';
 
 interface Props {
   game: GameState;
+  viewerId: string;
   now: number;
-  dispatch: (a: HumanAction) => void;
+  dispatch: (a: PlayerAction) => void;
   onFinish: () => void;
   onQuit: () => void;
 }
 
 const PHASE_LABEL: Record<Phase, string> = {
+  lobby: 'Salon',
   attribution: 'Attribution des rôles',
+  'resolution-nuit': 'Fin de la nuit',
+  verification: 'Vérification',
+  'resolution-vote': 'Dépouillement',
   cupidon: 'Nuit — Cupidon',
   voyante: 'Nuit — Voyante',
   loups: 'Nuit — Loups-garous',
@@ -42,8 +47,8 @@ function speak(text: string) {
   window.speechSynthesis.speak(u);
 }
 
-export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
-  const me = human(game)!;
+export function GameTable({ game, viewerId, now, dispatch, onFinish, onQuit }: Props) {
+  const me = byId(game, viewerId);
   const night = isNight(game.phase);
   const roomMode = game.settings.discussionMode === 'piece';
   const spectator = !me.alive;
@@ -55,6 +60,7 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
   const prevNight = useRef<boolean | null>(null);
   const prevDeaths = useRef(game.deaths.length);
   const remaining = Math.max(0, Math.ceil((game.phaseEndsAt - now) / 1000));
+  const myTurn = game.pending.includes(me.id) && !game.done.includes(me.id);
 
   // Transition animée à chaque passage nuit ↔ jour
   useEffect(() => {
@@ -86,21 +92,20 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
   }, [game.deaths.length]);
 
   useEffect(() => {
-    if (remaining === 10 && game.waitingHuman && !game.humanDone) play('alert');
-  }, [remaining, game.waitingHuman, game.humanDone]);
+    if (remaining === 10 && myTurn) play('alert');
+  }, [remaining, myTurn]);
 
   useEffect(() => {
     if (roomMode && autoRead) speak(game.announcement);
   }, [game.announcement, roomMode, autoRead]);
 
-  const myTurn = game.waitingHuman && !game.humanDone && (game.phase !== 'chasseur' || game.hunterQueue[0] === me.id);
   const partner = loverOf(game, me.id);
 
   const knownRole = (p: GPlayer): RoleId | null => {
-    if (p.isHuman || !p.alive || spectator || game.phase === 'fin') return p.role;
+    if (p.id === me.id || !p.alive || spectator || game.phase === 'fin') return p.role;
     if (me.role === 'loup' && p.role === 'loup') return 'loup';
     if (p.id === partner) return p.role;
-    return game.seerResults[p.id] ?? null;
+    return me.role === 'voyante' ? (game.seerResults[p.id] ?? null) : null;
   };
 
   const canTarget = (p: GPlayer) => {
@@ -109,15 +114,15 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
       case 'cupidon':
         return true;
       case 'voyante':
-        return !p.isHuman && !game.seerResults[p.id];
+        return p.id !== me.id && !game.seerResults[p.id];
       case 'loups':
         return p.role !== 'loup';
       case 'sorciere':
-        return game.witch.death && !p.isHuman;
+        return game.witch.death && p.id !== me.id;
       case 'chasseur':
-        return !p.isHuman;
+        return p.id !== me.id;
       case 'vote':
-        return !p.isHuman && (!game.runoff || game.runoff.includes(p.id));
+        return p.id !== me.id && (!game.runoff || game.runoff.includes(p.id));
       default:
         return false;
     }
@@ -135,7 +140,7 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
   const visible = game.messages.filter((m) => m.at <= now);
   const publicMsgs = visible.filter((m) => m.channel !== 'loups');
   const wolfMsgs = visible.filter((m) => m.channel === 'loups');
-  const notes = game.notes.filter((n) => n.at <= now);
+  const notes = game.notes.filter((n) => n.playerId === me.id && n.at <= now);
 
   const voteCount: Record<string, number> = {};
   if (game.phase === 'vote' || game.phase === 'verdict') {
@@ -190,7 +195,7 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
             <>
               <h3 className="action-panel__title alert-title">🐺 La meute chasse</h3>
               <p className="muted">Touchez un villageois pour le désigner comme victime.</p>
-              {Object.entries(game.wolfSuggestions).map(([wolf, target]) => (
+              {Object.entries(game.wolfVotes).filter(([wolf]) => wolf !== me.id).map(([wolf, target]) => (
                 <p key={wolf} className="suggestion">
                   {name(wolf)} propose <strong>{name(target)}</strong>
                 </p>
@@ -274,7 +279,7 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
       }
     }
 
-    if (game.waitingHuman && game.humanDone) {
+    if (game.pending.includes(me.id) && game.done.includes(me.id)) {
       return (
         <>
           <h3 className="action-panel__title">✓ Action enregistrée</h3>
@@ -287,7 +292,7 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
       );
     }
 
-    const skippable = game.phase === 'aube' || game.phase === 'verdict' || game.phase === 'debat';
+    const skippable = me.id === game.hostId && (game.phase === 'aube' || game.phase === 'verdict' || game.phase === 'debat');
     return (
       <>
         <h3 className="action-panel__title">{night ? '☾ Le village dort' : '📜 Le meneur'}</h3>
@@ -350,11 +355,11 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
               const targetable = canTarget(p);
               const role = knownRole(p);
               const isSelected = selected.includes(p.id);
-              const marked = game.wolfTarget === p.id && me.role === 'loup' && night;
+              const marked = game.wolfVotes[me.id] === p.id && me.role === 'loup' && night;
               return (
                 <button
                   key={p.id}
-                  className={`seat ${p.alive ? '' : 'is-dead'} ${p.isHuman ? 'is-me' : ''} ${isSelected ? 'is-selected' : ''} ${
+                  className={`seat ${p.alive ? '' : 'is-dead'} ${p.id === me.id ? 'is-me' : ''} ${isSelected ? 'is-selected' : ''} ${
                     targetable ? 'is-targetable' : ''
                   } ${marked || (myVote && myVote.target === p.id) ? 'is-marked' : ''}`}
                   style={{ '--x': `${50 + Math.cos(angle) * 42}%`, '--y': `${50 + Math.sin(angle) * 40}%` } as CSSProperties}
@@ -372,10 +377,10 @@ export function GameTable({ game, now, dispatch, onFinish, onQuit }: Props) {
                   </span>
                   <span className="seat__name">
                     {p.name}
-                    {p.isHuman && me.name !== 'Vous' && ' (vous)'}
+                    {p.id === me.id && me.name !== 'Vous' && ' (vous)'}
                   </span>
                   {!p.alive && <span className="seat__tag">✝ {ROLES[p.role].name}</span>}
-                  {p.alive && !p.isHuman && role && <span className={`seat__tag ${role === 'loup' ? 'seat__tag--wolf' : ''}`}>{ROLES[role].name}</span>}
+                  {p.alive && p.id !== me.id && role && <span className={`seat__tag ${role === 'loup' ? 'seat__tag--wolf' : ''}`}>{ROLES[role].name}</span>}
                 </button>
               );
             })}

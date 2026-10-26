@@ -2,7 +2,9 @@
 import { pick } from './rng';
 import { alivePlayers, byId, isWolf, loverOf } from './helpers';
 import { publicSuspicion, spreadSuspicion } from './bots';
-import type { Ctx, GameState } from './types';
+import type { GameState } from './types';
+
+type Rng = () => number;
 
 const ACCUSE = [
   '{x}, tu es bien silencieux depuis ce matin…',
@@ -27,18 +29,17 @@ const WOLF_SUGGEST = ['Je propose {x}.', 'On prend {x} cette nuit ?', '{x} comme
 const REPLY_ACCUSED = ['Moi ? Tu te trompes de cible.', "C'est facile d'accuser les autres…", 'Et toi alors ?'];
 
 const fill = (line: string, name: string) => line.replace('{x}', name);
-let counter = 0;
-const nextId = () => `m${(counter++).toString(36)}`;
 
 export function say(s: GameState, author: string, text: string, channel: 'public' | 'loups' | 'systeme', at: number) {
-  s.messages.push({ id: nextId(), author, text, channel, at });
+  // En mode « même pièce », il n'y a pas de chat : seules les annonces du meneur sont gardées.
+  if (channel !== 'systeme' && s.settings.discussionMode !== 'chat') return;
+  s.messages.push({ id: `m${s.messages.length}`, author, text, channel, at });
 }
 
 /** Prépare les messages des robots pendant le débat, étalés sur `windowMs`. */
-export function planDebateChat(s: GameState, ctx: Ctx, windowMs: number) {
-  const { rng, now } = ctx;
+export function planDebateChat(s: GameState, now: number, rng: Rng, windowMs: number) {
   const bots = alivePlayers(s).filter((p) => !p.isHuman);
-  const at = () => now + 1500 + rng() * windowMs;
+  const at = () => Math.round(now + 1500 + rng() * windowMs);
   const lastNight = s.deaths.filter((d) => d.day === s.day && d.cause !== 'vote');
 
   if (lastNight.length && bots.length) {
@@ -96,24 +97,24 @@ export function planDebateChat(s: GameState, ctx: Ctx, windowMs: number) {
 }
 
 /** Les loups-robots proposent leur victime dans le chat de la meute. */
-export function planWolfChat(s: GameState, ctx: Ctx) {
-  Object.entries(s.wolfSuggestions).forEach(([wolfId, target], i) => {
-    say(s, byId(s, wolfId).name, fill(pick(WOLF_SUGGEST, ctx.rng), byId(s, target).name), 'loups', ctx.now + 900 + i * 1400);
+export function planWolfChat(s: GameState, now: number, rng: Rng) {
+  Object.entries(s.wolfVotes).forEach(([wolfId, target], i) => {
+    say(s, byId(s, wolfId).name, fill(pick(WOLF_SUGGEST, rng), byId(s, target).name), 'loups', now + 900 + i * 1400);
   });
 }
 
 /** Réaction des robots à un message de l'humain qui cite un joueur. */
-export function reactToHuman(s: GameState, ctx: Ctx, channel: 'public' | 'loups', text: string) {
+export function reactToHuman(s: GameState, now: number, rng: Rng, speakerId: string, channel: 'public' | 'loups', text: string) {
   const lower = text.toLowerCase();
-  const named = alivePlayers(s).filter((p) => !p.isHuman && lower.includes(p.name.toLowerCase()));
+  const named = alivePlayers(s).filter((p) => !p.isHuman && p.id !== speakerId && lower.includes(p.name.toLowerCase()));
   for (const p of named) {
     if (channel === 'public') {
       spreadSuspicion(s, p.id, 0.6);
-      if (ctx.rng() < 0.7) say(s, p.name, pick(REPLY_ACCUSED, ctx.rng), 'public', ctx.now + 1500 + ctx.rng() * 2000);
+      if (rng() < 0.7) say(s, p.name, pick(REPLY_ACCUSED, rng), 'public', Math.round(now + 1500 + rng() * 2000));
     }
   }
   if (channel === 'loups' && named.length) {
     const wolf = alivePlayers(s).find((p) => p.role === 'loup' && !p.isHuman);
-    if (wolf) say(s, wolf.name, `D'accord, va pour ${named[0].name}.`, 'loups', ctx.now + 1500);
+    if (wolf) say(s, wolf.name, `D'accord, va pour ${named[0].name}.`, 'loups', now + 1500);
   }
 }
