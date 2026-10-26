@@ -36,6 +36,8 @@ export interface GPlayer {
   alive: boolean;
   /** Joueur humain (sinon : robot). */
   isHuman: boolean;
+  /** Connecté en ce moment (parties en ligne uniquement). */
+  online?: boolean;
 }
 
 export interface Death {
