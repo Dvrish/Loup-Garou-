@@ -3,12 +3,13 @@ import { Button } from '../components/Button';
 import { RolePortrait } from '../components/RolePortrait';
 import { play } from '../lib/audio';
 import { recordGame } from '../lib/stats';
-import { campOf, human } from '../game/helpers';
+import { byId, campOf } from '../game/helpers';
 import { ROLES } from '../game/roles';
 import type { GameState, Winner } from '../game/types';
 
 interface Props {
   game: GameState;
+  viewerId: string;
   onReplay: () => void;
   onHome: () => void;
 }
@@ -22,8 +23,8 @@ const TITLES: Record<Winner, string> = {
 
 const recorded = new WeakSet<GameState>();
 
-export function EndGame({ game, onReplay, onHome }: Props) {
-  const me = human(game)!;
+export function EndGame({ game, viewerId, onReplay, onHome }: Props) {
+  const me = byId(game, viewerId);
   const winner = game.winner ?? 'aucun';
   const iWon = campOf(game, me.id) === winner;
 
@@ -57,7 +58,7 @@ export function EndGame({ game, onReplay, onHome }: Props) {
                 <div>
                   <strong>
                     {p.name}
-                    {p.isHuman && ' (vous)'}
+                    {p.id === viewerId && ' (vous)'}
                     {game.lovers?.includes(p.id) && <span title="Amoureux"> ♥</span>}
                   </strong>
                   <span>{ROLES[p.role].name}</span>

@@ -3,14 +3,14 @@ import { Button } from '../components/Button';
 import { RolePortrait } from '../components/RolePortrait';
 import { play } from '../lib/audio';
 import { ROLES } from '../game/roles';
-import { human } from '../game/helpers';
+import { byId } from '../game/helpers';
 import type { GameState } from '../game/types';
 
-export function RoleReveal({ game, onReady }: { game: GameState; onReady: () => void }) {
+export function RoleReveal({ game, viewerId, onReady }: { game: GameState; viewerId: string; onReady: () => void }) {
   const [flipped, setFlipped] = useState(false);
-  const me = human(game)!;
+  const me = byId(game, viewerId);
   const role = ROLES[me.role];
-  const packmates = game.players.filter((p) => p.role === 'loup' && !p.isHuman);
+  const packmates = game.players.filter((p) => p.role === 'loup' && p.id !== viewerId);
 
   return (
     <div className="reveal">

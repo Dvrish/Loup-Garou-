@@ -9,7 +9,7 @@ Technologies : React, TypeScript, Vite, Supabase (à venir) et Netlify.
 | --- | --- | --- |
 | 1 | Écrans et design (données fictives, aucun serveur) | ✅ |
 | 2 | Partie locale simulée contre des robots | ✅ |
-| 3 | Moteur de jeu (machine à états) + tests | à venir |
+| 3 | Moteur de jeu (machine à états) + tests | ✅ |
 | 4 | Base de données Supabase, rôles secrets protégés | à venir |
 | 5 | Salles en temps réel, reconnexion, chronos serveur | à venir |
 | 6 | Tests avec plusieurs joueurs réels | à venir |
@@ -65,13 +65,15 @@ droits sur la base de données.
 npm install
 npm run dev     # serveur local
 npm run build   # vérification TypeScript + build de production dans dist/
-npm test        # tests des règles (dont 600 parties jouées entièrement par des robots)
+npm test        # tests du moteur : règles, refus d'actions, 900 parties simulées
 ```
 
 Organisation :
 
-- `src/game` : moteur de règles en TypeScript pur (`engine.ts`), décisions des robots
-  (`bots.ts`), phrases du chat (`lines.ts`), et `useLocalGame.ts` qui fait avancer le temps ;
+- `src/game` : moteur de jeu en TypeScript pur, organisé en machine à états
+  (`engine.ts`, expliqué dans [docs/machine-a-etats.md](docs/machine-a-etats.md)), décisions
+  des robots (`bots.ts`), phrases du chat (`lines.ts`), `useLocalGame.ts` qui fait avancer le
+  temps, et les tests dans `__tests__/` ;
 - `src/screens` : un fichier par écran ;
 - `src/components` : logo, portraits SVG des rôles, chat… ;
 - `src/lib` : types, effets sonores Web Audio, statistiques locales, données du salon de démonstration.

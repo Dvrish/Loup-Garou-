@@ -1,12 +1,16 @@
 import { ROLES } from './roles';
 import type { GameState, GPlayer } from './types';
 
-export const byId = (s: GameState, id: string) => s.players.find((p) => p.id === id)!;
+export const findPlayer = (s: GameState, id: string | null | undefined) => s.players.find((p) => p.id === id) ?? null;
+export const byId = (s: GameState, id: string) => {
+  const p = findPlayer(s, id);
+  if (!p) throw new Error(`Joueur inconnu : ${id}`);
+  return p;
+};
 export const alivePlayers = (s: GameState) => s.players.filter((p) => p.alive);
+export const isAlive = (s: GameState, id: string | null | undefined) => !!findPlayer(s, id)?.alive;
 export const isWolf = (s: GameState, id: string) => byId(s, id).role === 'loup';
-export const aliveWithRole = (s: GameState, role: GPlayer['role']) =>
-  s.players.find((p) => p.alive && p.role === role) ?? null;
-export const human = (s: GameState) => (s.humanId ? byId(s, s.humanId) : null);
+export const aliveWithRole = (s: GameState, role: GPlayer['role']) => s.players.filter((p) => p.alive && p.role === role);
 
 export function loverOf(s: GameState, id: string): string | null {
   if (!s.lovers) return null;
@@ -28,5 +32,5 @@ export function campOf(s: GameState, id: string): 'village' | 'loups' | 'amoureu
   return ROLES[byId(s, id).role].camp;
 }
 
-/** Joueurs qui peuvent être choisis : vivants, différents de `except`. */
+/** Joueurs vivants autres que `except`. */
 export const others = (s: GameState, except: string) => alivePlayers(s).filter((p) => p.id !== except);

@@ -6,6 +6,7 @@ import { play } from '../lib/audio';
 import { LOBBY_PLAYERS } from '../lib/mock';
 import { ROLE_ORDER, ROLES } from '../game/roles';
 import { BOT_NAMES } from '../game/useLocalGame';
+import { settingsProblems } from '../game/engine';
 import type { GameSettings, Player, RoleId, TieRule } from '../lib/types';
 
 export type LobbyMode = 'robots' | 'enligne';
@@ -48,12 +49,7 @@ export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSe
   const link = `${window.location.origin}/?code=${code}`;
 
   const totalRoles = Object.values(settings.roles).reduce((a, b) => a + b, 0);
-  const wolves = settings.roles.loup;
-  const problems: string[] = [];
-  if (totalRoles !== settings.playerCount)
-    problems.push(`Il y a ${totalRoles} rôle(s) pour ${settings.playerCount} joueurs.`);
-  if (wolves < 1) problems.push('Il faut au moins un loup-garou.');
-  if (wolves >= settings.playerCount / 2) problems.push('Trop de loups : ils doivent être moins de la moitié.');
+  const problems = settingsProblems(settings);
   const canLaunch = isHost && problems.length === 0;
 
   const set = (patch: Partial<GameSettings>) => onSettings({ ...settings, ...patch });

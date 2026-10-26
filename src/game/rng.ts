@@ -1,13 +1,27 @@
-/** Générateur pseudo-aléatoire reproductible (utile pour les tests). */
+/** Générateur pseudo-aléatoire reproductible (mulberry32). */
+function step(seed: number): [number, number] {
+  const next = (seed + 0x6d2b79f5) >>> 0;
+  let t = next;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return [next, ((t ^ (t >>> 14)) >>> 0) / 4294967296];
+}
+
+/** Tire un nombre entre 0 et 1 et fait avancer la graine stockée dans l'objet. */
+export function rand(holder: { seed: number }): number {
+  const [next, value] = step(holder.seed);
+  holder.seed = next;
+  return value;
+}
+
+/** Générateur autonome (pour l'interface et les tests). */
 export function makeRng(seed = Date.now()): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+  const holder = { seed: seed >>> 0 };
+  return () => rand(holder);
+}
+
+export function newSeed(): number {
+  return Math.floor(Math.random() * 2 ** 32);
 }
 
 export function pick<T>(items: T[], rng: () => number): T {

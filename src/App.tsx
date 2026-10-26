@@ -3,7 +3,7 @@ import { Backdrop } from './components/Backdrop';
 import { unlockAudio } from './lib/audio';
 import { DEFAULT_SETTINGS, LOBBY_PLAYERS, makeInviteCode } from './lib/mock';
 import type { GameSettings, Screen } from './lib/types';
-import { BOT_NAMES, useLocalGame } from './game/useLocalGame';
+import { BOT_NAMES, VIEWER_ID, useLocalGame } from './game/useLocalGame';
 import { Home } from './screens/Home';
 import { Lobby, type LobbyMode } from './screens/Lobby';
 import { RoleReveal } from './screens/RoleReveal';
@@ -83,6 +83,7 @@ export function App() {
         {screen === 'revelation' && local.game && (
           <RoleReveal
             game={local.game}
+            viewerId={VIEWER_ID}
             onReady={() => {
               local.start();
               setScreen('table');
@@ -92,8 +93,9 @@ export function App() {
         {screen === 'table' && local.game && (
           <GameTable
             game={local.game}
+            viewerId={VIEWER_ID}
             now={local.now}
-            dispatch={local.dispatch}
+            dispatch={local.act}
             onFinish={() => setScreen('fin')}
             onQuit={() => {
               local.reset();
@@ -102,7 +104,7 @@ export function App() {
           />
         )}
         {screen === 'fin' && local.game && (
-          <EndGame game={local.game} onReplay={() => setScreen('lobby')} onHome={() => setScreen('accueil')} />
+          <EndGame game={local.game} viewerId={VIEWER_ID} onReplay={() => setScreen('lobby')} onHome={() => setScreen('accueil')} />
         )}
       </main>
     </div>
