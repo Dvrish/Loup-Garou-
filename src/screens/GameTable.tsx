@@ -373,6 +373,7 @@ export function GameTable({ game, viewerId, now, dispatch, onFinish, onQuit }: P
                       <span className="seat__initial">{p.name.charAt(0)}</span>
                     )}
                     {voteCount[p.id] ? <span className="seat__votes">{voteCount[p.id]}</span> : null}
+                    {p.online === false && p.alive && <span className="seat__offline" title="Hors ligne" />}
                     {game.lovers?.includes(p.id) && (partner || me.role === 'cupidon' || spectator) && <span className="seat__heart">♥</span>}
                   </span>
                   <span className="seat__name">

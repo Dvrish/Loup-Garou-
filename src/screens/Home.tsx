@@ -6,6 +6,9 @@ import { RolePortrait } from '../components/RolePortrait';
 import { play } from '../lib/audio';
 
 interface Props {
+  /** Code reçu dans le lien d'invitation (?code=…) : la fenêtre « Rejoindre » s'ouvre directement. */
+  initialCode?: string | null;
+  busy?: boolean;
   pseudo: string;
   onPseudo: (p: string) => void;
   onPlay: () => void;
@@ -15,9 +18,18 @@ interface Props {
   onAudio: () => void;
 }
 
-export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, onAudio }: Props) {
-  const [joinOpen, setJoinOpen] = useState(false);
-  const [code, setCode] = useState('');
+export function Home({ initialCode, busy, pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, onAudio }: Props) {
+  const [joinOpen, setJoinOpen] = useState(!!initialCode);
+  const [code, setCode] = useState((initialCode ?? '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5));
+  const [needPseudo, setNeedPseudo] = useState(false);
+  /** Le jeu en ligne a besoin d'un pseudo : on le demande avant de continuer. */
+  const withPseudo = (fn: () => void) => () => {
+    if (pseudo.trim()) fn();
+    else {
+      setNeedPseudo(true);
+      play('alert');
+    }
+  };
   const valid = /^[A-Z]{5}$/.test(code);
 
   return (
@@ -40,10 +52,14 @@ export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, on
             className="input"
             value={pseudo}
             maxLength={16}
-            onChange={(e) => onPseudo(e.target.value)}
+            onChange={(e) => {
+              onPseudo(e.target.value);
+              setNeedPseudo(false);
+            }}
             placeholder="Ex. : Margot"
           />
         </label>
+        {needPseudo && <p className="alert home__error">Choisissez d’abord un pseudo pour jouer en ligne.</p>}
 
         <nav className="home__menu">
           <Button size="lg" className="btn--stack" onClick={onPlay}>
@@ -51,7 +67,7 @@ export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, on
             <small>Partie d’entraînement contre des robots</small>
           </Button>
           <div className="home__row">
-            <Button variant="ghost" onClick={onCreate}>
+            <Button variant="ghost" disabled={busy} onClick={withPseudo(onCreate)}>
               Créer une partie
             </Button>
             <Button variant="ghost" onClick={() => setJoinOpen(true)}>
@@ -67,7 +83,7 @@ export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, on
             </Button>
           </div>
         </nav>
-        <p className="home__foot">De 6 à 16 joueurs · Le multijoueur en ligne arrive bientôt : pour l’instant, les autres places sont tenues par des robots.</p>
+        <p className="home__foot">De 6 à 16 joueurs · « Créer une partie » pour jouer entre amis, chacun sur son téléphone.</p>
       </div>
 
       {joinOpen && (
@@ -77,10 +93,14 @@ export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, on
             className="join"
             onSubmit={(e) => {
               e.preventDefault();
-              if (valid) onJoin(code);
+              if (valid && pseudo.trim()) onJoin(code);
               else play('alert');
             }}
           >
+            <label className="field">
+              <span className="field__label">Votre pseudo</span>
+              <input className="input" value={pseudo} maxLength={16} onChange={(e) => onPseudo(e.target.value)} placeholder="Ex. : Margot" />
+            </label>
             <input
               className="input input--code"
               value={code}
@@ -91,8 +111,8 @@ export function Home({ pseudo, onPseudo, onPlay, onCreate, onJoin, onProfile, on
               placeholder="ABCDE"
               onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g, ''))}
             />
-            <Button type="submit" disabled={!valid}>
-              Entrer dans le village
+            <Button type="submit" disabled={!valid || !pseudo.trim() || busy}>
+              {busy ? 'Connexion…' : 'Entrer dans le village'}
             </Button>
           </form>
         </Modal>

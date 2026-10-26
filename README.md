@@ -11,7 +11,7 @@ Technologies : React, TypeScript, Vite, Supabase (à venir) et Netlify.
 | 2 | Partie locale simulée contre des robots | ✅ |
 | 3 | Moteur de jeu (machine à états) + tests | ✅ |
 | 4 | Base de données Supabase, rôles secrets protégés | ✅ (à installer, voir ci-dessous) |
-| 5 | Salles en temps réel, reconnexion, chronos serveur | à venir |
+| 5 | Salles en temps réel, reconnexion, chronos serveur | ✅ (fichier SQL n° 3 à installer) |
 | 6 | Tests avec plusieurs joueurs réels | à venir |
 | 7 | Mise en ligne définitive sur Netlify | à venir |
 
@@ -85,6 +85,29 @@ droits sur la base de données.
   le navigateur ; seules les personnes concernées reçoivent l'information (la sorcière apprend
   la victime pendant son tour, chaque amoureux apprend le nom de l'autre).
 
+### Étape 5 : temps réel et chrono serveur
+
+Dans **SQL Editor** → **New query**, exécutez une seule fois
+[`supabase/migrations/20261028000003_temps_reel.sql`](supabase/migrations/20261028000003_temps_reel.sql)
+(après les fichiers 1 et 2). Il ajoute :
+
+- la **présence** (qui est en ligne) et le **transfert automatique de l'hôte** s'il se déconnecte ;
+- le **temps réel** : chaque navigateur est prévenu dès qu'un joueur agit ;
+- le **chrono tenu par le serveur** : une tâche `pg_cron` fait avancer les parties toutes les
+  5 secondes, même si tous les téléphones sont en veille. Si Supabase refuse d'activer `pg_cron`,
+  un message l'indique et les navigateurs font avancer les chronos eux-mêmes (activable ensuite
+  dans **Database → Extensions → pg_cron**, puis en exécutant à nouveau la ligne
+  `select cron.schedule('loups-garous-chrono', '5 seconds', 'select public._tick_all()');`).
+
+## Jouer en ligne
+
+1. Une personne choisit un pseudo puis **Créer une partie** : elle devient l'hôte.
+2. Elle partage le **code** ou le **lien** (bouton « Copier le lien »). Les autres l'ouvrent sur
+   leur téléphone, choisissent un pseudo et entrent dans le village.
+3. L'hôte règle le nombre de joueurs (il doit correspondre aux présents), les rôles et le mode
+   de discussion, puis **Lancer la partie**.
+4. Si quelqu'un recharge sa page ou perd la connexion, il retrouve la partie en rouvrant le jeu.
+
 ## Pour les développeurs
 
 ```bash
@@ -106,4 +129,14 @@ Organisation :
   du salon de démonstration ;
 - `supabase/migrations` : tables, règles d'accès (RLS) et fonctions du jeu côté serveur ;
 - `supabase/tests` : tests du serveur sur un vrai PostgreSQL embarqué (PGlite), avec plusieurs
-  joueurs simulés chacun connecté sous sa propre identité.
+  joueurs simulés chacun connecté sous sa propre identité ;
+- `src/online` : appels au serveur, synchronisation (Realtime + relecture de secours) ;
+- `e2e` : test de bout en bout avec plusieurs navigateurs. `e2e/faux-supabase.mjs` imite
+  Supabase (connexion anonyme, fonctions, chrono) au-dessus de PGlite :
+
+  ```bash
+  node e2e/faux-supabase.mjs &                       # faux serveur sur le port 54321
+  VITE_SUPABASE_URL=http://localhost:54321 VITE_SUPABASE_ANON_KEY=faux npx vite build --outDir dist-e2e
+  npx vite preview --outDir dist-e2e --port 4174 &
+  node e2e/partie-en-ligne.mjs http://localhost:4174 8   # 8 navigateurs indépendants
+  ```

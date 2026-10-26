@@ -316,3 +316,81 @@ describe('parties complètes jouées par des joueurs simulés', () => {
     }
   }, 600000);
 });
+
+// ------------------------------------------------------------------ étape 5 : temps réel
+
+describe('instantanés, présence et chrono serveur', () => {
+  it('room_state et game_state ne montrent que ce que RLS autorise', async () => {
+    const db = await Db.create();
+    const g = await setupGame(db, 8);
+    const outsider = await db.newUser();
+    expect(await db.rpcError(outsider, 'room_state', [g.room_id])).toBe('Vous n’êtes pas dans ce salon.');
+    expect(await db.rpcError(outsider, 'game_state', [g.game])).toBe('Vous ne participez pas à cette partie.');
+
+    const room = await db.rpc<any>(g.users[3], 'room_state', [g.room_id]);
+    expect(room.room).toMatchObject({ code: g.code, status: 'en_jeu', host_id: g.users[0] });
+    expect(room.players.map((p: any) => p.pseudo)).toEqual(NAMES.slice(0, 8));
+    expect(room.game_id).toBe(g.game);
+
+    for (const u of g.users) {
+      const s = await db.rpc<any>(u, 'game_state', [g.game]);
+      const visible = s.players.filter((p: any) => p.role !== null).map((p: any) => p.id).sort();
+      const expected = g.roles[u] === 'loup' ? g.users.filter((x) => g.roles[x] === 'loup').sort() : [u];
+      expect(visible).toEqual(expected);
+      expect(s.view.role).toBe(g.roles[u]);
+      expect(s.me).toBe(u);
+      expect(typeof s.server_now).toBe('string');
+    }
+  }, 60000);
+
+  it('le chat de la meute et les choix des loups restent cachés dans game_state', async () => {
+    const db = await Db.create();
+    const g = await setupGame(db, 8);
+    await db.expire(g.game);
+    await db.rpc(g.users[0], 'advance_game', [g.game]);
+    const wolves = g.users.filter((u) => g.roles[u] === 'loup');
+    const villager = g.users.find((u) => g.roles[u] === 'villageois')!;
+    while ((await phaseOf(db, g.game)) !== 'loups') {
+      await db.expire(g.game);
+      await db.rpc(g.users[0], 'advance_game', [g.game]);
+    }
+    await db.rpc(wolves[0], 'send_message', [g.game, 'loups', 'Discrètement…']);
+    await db.rpc(wolves[0], 'act_loups', [g.game, villager]);
+    const forWolf = await db.rpc<any>(wolves[1], 'game_state', [g.game]);
+    const forVillager = await db.rpc<any>(villager, 'game_state', [g.game]);
+    expect(forWolf.wolf_votes).toEqual({ [wolves[0]]: villager });
+    expect(forWolf.messages.some((m: any) => m.text === 'Discrètement…')).toBe(true);
+    expect(forVillager.wolf_votes).toEqual({});
+    expect(forVillager.messages.some((m: any) => m.channel === 'loups')).toBe(false);
+  }, 60000);
+
+  it('heartbeat : un hôte absent depuis 45 s est remplacé par le joueur présent le plus ancien', async () => {
+    const db = await Db.create();
+    const [host, a, b] = [await db.newUser(), await db.newUser(), await db.newUser()];
+    const { room_id, code } = await db.rpc<{ room_id: string; code: string }>(host, 'create_room', ['Aubin']);
+    await db.rpc(a, 'join_room', [code, 'Margot']);
+    await db.rpc(b, 'join_room', [code, 'Basile']);
+    await db.rpc(b, 'heartbeat', [room_id]);
+    expect((await db.rpc<any>(b, 'room_state', [room_id])).room.host_id).toBe(host);
+    await db.admin(`update room_players set last_seen = now() - interval '1 minute' where player_id in ($1, $2)`, [host, a]);
+    expect((await db.rpc<any>(b, 'room_state', [room_id])).players.map((p: any) => p.online)).toEqual([false, false, true]);
+    await db.rpc(b, 'heartbeat', [room_id]);
+    expect((await db.rpc<any>(b, 'room_state', [room_id])).room.host_id).toBe(b);
+    // Le nouvel hôte peut retirer un joueur parti ; les autres non
+    expect(await db.rpcError(a, 'kick_player', [room_id, host])).toBe('Seul l’hôte peut retirer un joueur.');
+    await db.rpc(b, 'kick_player', [room_id, a]);
+    expect((await db.rpc<any>(b, 'room_state', [room_id])).players.map((p: any) => p.pseudo)).toEqual(['Aubin', 'Basile']);
+  }, 60000);
+
+  it('_tick_all fait avancer les parties dont le chrono est écoulé, et seulement elles', async () => {
+    const db = await Db.create();
+    const g1 = await setupGame(db, 6);
+    const g2 = await setupGame(db, 6);
+    await db.expire(g1.game);
+    const [{ n }] = await db.admin<{ n: number }>('select public._tick_all() as n');
+    expect(n).toBe(1);
+    expect(await phaseOf(db, g1.game)).not.toBe('attribution');
+    expect(await phaseOf(db, g2.game)).toBe('attribution');
+    await expect(db.as(g1.users[0], 'select public._tick_all()')).rejects.toThrow(/permission denied/);
+  }, 60000);
+});

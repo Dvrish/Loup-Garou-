@@ -3,7 +3,6 @@ import { Button } from '../components/Button';
 import { RolePortrait } from '../components/RolePortrait';
 import { TopBar } from '../components/TopBar';
 import { play } from '../lib/audio';
-import { LOBBY_PLAYERS } from '../lib/mock';
 import { ROLE_ORDER, ROLES } from '../game/roles';
 import { BOT_NAMES } from '../game/useLocalGame';
 import { settingsProblems } from '../game/engine';
@@ -13,14 +12,17 @@ export type LobbyMode = 'robots' | 'enligne';
 
 interface Props {
   mode: LobbyMode;
-  code: string;
   pseudo: string;
   isHost: boolean;
-  onToggleHost: () => void;
   settings: GameSettings;
   onSettings: (s: GameSettings) => void;
   onBack: () => void;
   onLaunch: () => void;
+  /** Partie en ligne : code d'invitation et joueurs présents dans le salon. */
+  code?: string;
+  players?: Player[];
+  onKick?: (playerId: string) => void;
+  busy?: boolean;
 }
 
 const UNIQUE_ROLES: RoleId[] = ['voyante', 'sorciere', 'chasseur', 'cupidon'];
@@ -37,7 +39,7 @@ function formatDuration(s: number) {
   return m ? `${m} min${r ? ` ${r}s` : ''}` : `${r} s`;
 }
 
-export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSettings, onBack, onLaunch }: Props) {
+export function Lobby({ mode, code = '', pseudo, isHost, settings, onSettings, onBack, onLaunch, players: online = [], onKick, busy }: Props) {
   const [copied, setCopied] = useState(false);
   const robots = mode === 'robots';
   const players: Player[] = robots
@@ -45,11 +47,13 @@ export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSe
         { id: 'me', name: pseudo || 'Vous', online: true, isHost: true, isMe: true, alive: true },
         ...BOT_NAMES.slice(0, settings.playerCount - 1).map((name, i) => ({ id: `b${i}`, name, online: true, isBot: true, alive: true })),
       ]
-    : LOBBY_PLAYERS.map((p) => (p.isMe ? { ...p, name: pseudo || 'Vous', isHost } : { ...p, isHost: !isHost && p.id === 'p2' }));
+    : online;
   const link = `${window.location.origin}/?code=${code}`;
 
   const totalRoles = Object.values(settings.roles).reduce((a, b) => a + b, 0);
   const problems = settingsProblems(settings);
+  if (!robots && players.length !== settings.playerCount)
+    problems.unshift(`Il faut ${settings.playerCount} joueurs dans le salon (actuellement ${players.length}).`);
   const canLaunch = isHost && problems.length === 0;
 
   const set = (patch: Partial<GameSettings>) => onSettings({ ...settings, ...patch });
@@ -80,13 +84,6 @@ export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSe
     <div className="lobby">
       <TopBar
         onBack={onBack}
-        right={
-          robots ? undefined : (
-            <button className="chip chip--demo" onClick={onToggleHost} title="Démo : changer de point de vue">
-              Vue : {isHost ? 'Hôte' : 'Invité'}
-            </button>
-          )
-        }
       />
 
       {robots ? (
@@ -110,9 +107,7 @@ export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSe
             {copied ? '✓ Lien copié' : 'Copier le lien'}
           </Button>
         </div>
-        <p className="lobby__note">
-          Aperçu : le vrai multijoueur arrive à l’étape 5. En attendant, les places sont tenues par des robots.
-        </p>
+        <p className="lobby__note">Partagez le code ou le lien : chacun rejoint depuis son téléphone ou son ordinateur.</p>
       </section>
       )}
 
@@ -135,8 +130,13 @@ export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSe
                 {p.isHost && <span className="tag tag--host">♛ Hôte</span>}
                 {p.isBot && <span className="tag">⚙ Robot</span>}
                 <span className={`status ${p.online ? 'status--on' : 'status--off'}`}>
-                  {p.online ? 'En ligne' : 'Reconnexion…'}
+                  {p.online ? 'En ligne' : 'Hors ligne'}
                 </span>
+                {onKick && isHost && !p.isMe && !p.online && (
+                  <button className="link" onClick={() => onKick(p.id)} title="Retirer ce joueur du salon">
+                    Retirer
+                  </button>
+                )}
               </li>
             ))}
             {!robots && Array.from({ length: Math.max(0, settings.playerCount - players.length) }, (_, i) => (
@@ -277,15 +277,12 @@ export function Lobby({ mode, code, pseudo, isHost, onToggleHost, settings, onSe
       <footer className="lobby__footer">
         {problems.length > 0 && isHost && <p className="alert">⚠ {problems[0]}</p>}
         {isHost ? (
-          <Button size="lg" disabled={!canLaunch} onClick={onLaunch}>
-            Lancer la partie
+          <Button size="lg" disabled={!canLaunch || busy} onClick={onLaunch}>
+            {busy ? 'Lancement…' : 'Lancer la partie'}
           </Button>
         ) : (
           <p className="muted waiting">
             <span className="dots" /> En attente du lancement par l’hôte…
-            <button className="link" onClick={onLaunch}>
-              (démo : simuler le lancement)
-            </button>
           </p>
         )}
       </footer>

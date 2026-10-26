@@ -6,3 +6,4 @@ dist
 .netlify
 .DS_Store
 *.log
+dist-e2e
