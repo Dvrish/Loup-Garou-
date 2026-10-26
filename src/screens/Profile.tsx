@@ -1,4 +1,7 @@
+import { useState } from 'react';
+import { Button } from '../components/Button';
 import { RolePortrait } from '../components/RolePortrait';
+import type { CheckStep } from '../lib/supabase';
 import { TopBar } from '../components/TopBar';
 import { loadStats } from '../lib/stats';
 import { ROLE_ORDER, ROLES } from '../game/roles';
@@ -10,6 +13,8 @@ function when(iso: string) {
 }
 
 export function Profile({ pseudo, onBack }: { pseudo: string; onBack: () => void }) {
+  const [check, setCheck] = useState<CheckStep[] | null>(null);
+  const [checking, setChecking] = useState(false);
   const games = loadStats();
   const wins = games.filter((g) => g.won).length;
   const rate = games.length ? Math.round((wins / games.length) * 100) : 0;
@@ -76,6 +81,34 @@ export function Profile({ pseudo, onBack }: { pseudo: string; onBack: () => void
             </li>
           ))}
         </ul>
+      </section>
+      <section className="panel">
+        <h2>Serveur en ligne</h2>
+        <p className="muted">Vérifie que la base de données Supabase est prête pour le multijoueur.</p>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={checking}
+          onClick={async () => {
+            setChecking(true);
+            // Chargé à la demande : le client Supabase n'alourdit pas le reste du jeu.
+            const { checkServer } = await import('../lib/supabase');
+            setCheck(await checkServer(pseudo));
+            setChecking(false);
+          }}
+        >
+          {checking ? 'Vérification…' : 'Vérifier la connexion'}
+        </Button>
+        {check && (
+          <ul className="server-check">
+            {check.map((c) => (
+              <li key={c.label} className={c.ok ? 'ok' : c.ok === false ? 'warn' : 'muted'}>
+                {c.ok ? '✓' : c.ok === false ? '✗' : '…'} {c.label}
+                {c.detail && <small>{c.detail}</small>}
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
       <p className="muted center">Statistiques enregistrées sur cet appareil uniquement (elles suivront votre compte à l’étape 4).</p>
     </div>

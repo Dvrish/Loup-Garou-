@@ -10,7 +10,7 @@ Technologies : React, TypeScript, Vite, Supabase (à venir) et Netlify.
 | 1 | Écrans et design (données fictives, aucun serveur) | ✅ |
 | 2 | Partie locale simulée contre des robots | ✅ |
 | 3 | Moteur de jeu (machine à états) + tests | ✅ |
-| 4 | Base de données Supabase, rôles secrets protégés | à venir |
+| 4 | Base de données Supabase, rôles secrets protégés | ✅ (à installer, voir ci-dessous) |
 | 5 | Salles en temps réel, reconnexion, chronos serveur | à venir |
 | 6 | Tests avec plusieurs joueurs réels | à venir |
 | 7 | Mise en ligne définitive sur Netlify | à venir |
@@ -48,16 +48,42 @@ multijoueur n'existe pas (étape 5), les autres places y sont aussi tenues par d
    prévisualisation** (*Deploy Preview*), visible directement dans la pull request.
    Vous pouvez ainsi tester une étape avant de la valider.
 
-### Variables d'environnement (à partir de l'étape 4)
+## Installer la base de données Supabase (une seule fois)
 
-Le fichier `.env.example` liste les variables nécessaires. Elles se saisissent dans Netlify :
-**Site configuration → Environment variables**.
+Tout se fait dans le navigateur, sur [supabase.com/dashboard](https://supabase.com/dashboard),
+dans le projet `fjpqtxtlhffjubyqogos`.
 
-- `VITE_SUPABASE_URL` : l'adresse de votre projet Supabase ;
-- `VITE_SUPABASE_ANON_KEY` : la clé **publique** « anon ».
+1. **Activer la connexion anonyme** : menu **Authentication** → **Sign In / Providers** →
+   activez **Allow anonymous sign-ins**, puis **Save**. Les joueurs n'ont ainsi besoin que
+   d'un pseudo, sans e-mail ni mot de passe.
+2. **Créer les tables** : menu **SQL Editor** → **New query**. Ouvrez sur GitHub le fichier
+   [`supabase/migrations/20261027000001_schema.sql`](supabase/migrations/20261027000001_schema.sql),
+   cliquez sur l'icône « Copy raw file », collez dans l'éditeur, puis **Run**. Le message
+   « Success. No rows returned » doit s'afficher.
+3. **Installer les règles du jeu** : nouvelle requête, et même chose avec
+   [`supabase/migrations/20261027000002_jeu.sql`](supabase/migrations/20261027000002_jeu.sql).
+   Respectez l'ordre : fichier 1, puis fichier 2, une seule fois chacun.
+4. **Vérifier** : ouvrez le jeu (adresse Netlify), écran **Profil & statistiques** →
+   **Vérifier la connexion**. Les trois lignes doivent passer au vert ✓.
+
+L'adresse du projet et la clé publique « anon » sont déjà dans le code (`src/lib/supabase.ts`) :
+elles sont publiques par nature, ce sont les règles de sécurité de la base qui protègent les
+données. Il n'y a donc pas de variable à saisir dans Netlify (vous pouvez néanmoins les
+remplacer par `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY`).
 
 ⚠️ Ne mettez jamais la clé `service_role` dans Netlify ni dans le code : elle donne tous les
 droits sur la base de données.
+
+### Comment la base protège la partie
+
+- Le navigateur ne peut **rien écrire directement** : chaque action (voter, choisir une victime,
+  envoyer un message…) passe par une fonction du serveur qui vérifie les règles, exactement
+  comme le moteur du jeu. Le serveur est la source de vérité.
+- Les **rôles sont secrets** : chacun ne voit que le sien, les loups voient les autres loups ; le
+  rôle d'un mort est révélé à tous. Le chat de la meute n'est lisible que par les loups.
+- La cible des loups, les potions et le couple d'amoureux sont dans une table illisible depuis
+  le navigateur ; seules les personnes concernées reçoivent l'information (la sorcière apprend
+  la victime pendant son tour, chaque amoureux apprend le nom de l'autre).
 
 ## Pour les développeurs
 
@@ -65,7 +91,7 @@ droits sur la base de données.
 npm install
 npm run dev     # serveur local
 npm run build   # vérification TypeScript + build de production dans dist/
-npm test        # tests du moteur : règles, refus d'actions, 900 parties simulées
+npm test        # tests du moteur (900 parties simulées) et du serveur SQL (PGlite)
 ```
 
 Organisation :
@@ -76,4 +102,8 @@ Organisation :
   temps, et les tests dans `__tests__/` ;
 - `src/screens` : un fichier par écran ;
 - `src/components` : logo, portraits SVG des rôles, chat… ;
-- `src/lib` : types, effets sonores Web Audio, statistiques locales, données du salon de démonstration.
+- `src/lib` : types, connexion Supabase, effets sonores Web Audio, statistiques locales, données
+  du salon de démonstration ;
+- `supabase/migrations` : tables, règles d'accès (RLS) et fonctions du jeu côté serveur ;
+- `supabase/tests` : tests du serveur sur un vrai PostgreSQL embarqué (PGlite), avec plusieurs
+  joueurs simulés chacun connecté sous sa propre identité.
