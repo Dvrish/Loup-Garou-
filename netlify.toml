@@ -1,0 +1,13 @@
+# Configuration Netlify : Netlify lit ce fichier automatiquement.
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Application à page unique : toutes les adresses renvoient vers index.html
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
